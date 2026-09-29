@@ -568,10 +568,11 @@ static inline uint32_t iq2_s_apply_sign4(uint32_t magnitude, uint32_t sign4) {
 // VTCM gather path: one 32-row word vector pair per group, built from the
 // copied codebook with Q6_vgather instead of scalar .rodata loads.
 static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restrict tile, int l) {
-    const size_t grid_rt = (size_t) htp_iq2s_grid_vtcm;
-    const size_t lut_rt  = grid_rt + IQ2S_GRID_BYTES;
-    const uint32_t grid_mu = IQ2S_GRID_BYTES;
-    const uint32_t lut_mu  = IQ2S_LUT_BYTES;
+    const uint32_t grid_rt = (uint32_t) (uintptr_t) htp_iq2s_grid_vtcm;
+    const uint32_t lut_rt  = grid_rt + IQ2S_GRID_BYTES;
+    // vgather Mu is the byte offset of the last valid byte, not the region size.
+    const uint32_t grid_mu = IQ2S_GRID_BYTES - 1;
+    const uint32_t lut_mu  = IQ2S_LUT_BYTES - 1;
 
     const HVX_Vector v_idx  = hvx_vmemu(tile + 0   + l * 32);
     const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
