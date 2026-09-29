@@ -541,6 +541,7 @@ static inline HVX_Vector scale_q6_k_32x1(HVX_VectorPair v_sums, HVX_Vector v_sca
 #define IQ2S_GRID_BYTES 8192
 #define IQ2S_LUT_BYTES  64
 extern const uint64_t * htp_iq2s_grid_vtcm;
+extern uint8_t * htp_iq2s_gather_scratch_vtcm;
 
 // IQ2_S direct dot helpers.
 //
@@ -597,15 +598,19 @@ static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restri
         Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
             Q6_Vub_vlsr_VubR(v_sign, 4))))), 2);
 
-    HVX_Vector g0 __attribute__((aligned(128)));
-    HVX_Vector g1 __attribute__((aligned(128)));
-    HVX_Vector n0 __attribute__((aligned(128)));
-    HVX_Vector n1 __attribute__((aligned(128)));
+    // Fixed gather scratch in VTCM, diagnostic only: requires n_hvx=1.
+    // Production implementation must use per-thread scratch.
+    HVX_Vector * scratch = (HVX_Vector *) htp_iq2s_gather_scratch_vtcm;
 
-    Q6_vgather_ARMVw(&g0, grid_rt, grid_mu, v_off);       // low 4 magnitudes
-    Q6_vgather_ARMVw(&g1, grid_rt, grid_mu, v_off_hi);    // high 4 magnitudes
-    Q6_vgather_ARMVw(&n0, lut_rt, lut_mu, v_off_s0);
-    Q6_vgather_ARMVw(&n1, lut_rt, lut_mu, v_off_s1);
+    Q6_vgather_ARMVw(&scratch[0], grid_rt, grid_mu, v_off);      // low 4 magnitudes
+    Q6_vgather_ARMVw(&scratch[1], grid_rt, grid_mu, v_off_hi);   // high 4 magnitudes
+    Q6_vgather_ARMVw(&scratch[2], lut_rt, lut_mu, v_off_s0);
+    Q6_vgather_ARMVw(&scratch[3], lut_rt, lut_mu, v_off_s1);
+
+    const HVX_Vector g0 = scratch[0];
+    const HVX_Vector g1 = scratch[1];
+    const HVX_Vector n0 = scratch[2];
+    const HVX_Vector n1 = scratch[3];
 
     const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
     const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g0, n0), Q6_V_vand_VV(n0, v_ones));

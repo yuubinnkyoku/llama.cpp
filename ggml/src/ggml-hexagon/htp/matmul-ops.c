@@ -247,6 +247,13 @@ static const uint8_t __attribute__((aligned(VLEN))) kvalues_mxfp4_lut[] = {
 // HTP_IQ2S_GRID_VTCM_RESERVE shrink. NULL selects the scalar lookup path.
 const uint64_t * htp_iq2s_grid_vtcm = NULL;
 
+// Fixed VTCM scratch for IQ2_S vgather results, diagnostic only.
+// Requires n_hvx=1; production must use per-thread scratch.
+uint8_t * htp_iq2s_gather_scratch_vtcm = NULL;
+
+// reserve layout: codebook + LUT, then 128-aligned gather scratch
+#define IQ2S_SCRATCH_OFFSET (((IQ2S_GRID_BYTES + IQ2S_LUT_BYTES) + 127) & ~(size_t) 127)
+
 _Static_assert(sizeof(iq2s_grid) == IQ2S_GRID_BYTES, "IQ2S_GRID_BYTES mismatch");
 _Static_assert(sizeof(iq2_s_sign4_lut) == IQ2S_LUT_BYTES, "IQ2S_LUT_BYTES mismatch");
 
@@ -255,12 +262,15 @@ static void htp_iq2s_grid_copy(struct htp_context * ctx) {
     memcpy(base, iq2s_grid, IQ2S_GRID_BYTES);
     memcpy(base + IQ2S_GRID_BYTES, iq2_s_sign4_lut, IQ2S_LUT_BYTES);
     htp_iq2s_grid_vtcm = (const uint64_t *) base;
+    htp_iq2s_gather_scratch_vtcm = base + IQ2S_SCRATCH_OFFSET;
 }
 
 // Called from the single-threaded matmul setup path before worker threads run
 void htp_iq2s_grid_ensure(struct htp_context * ctx) {
     if (ctx->iq2s_grid_ready) {
-        htp_iq2s_grid_vtcm = (const uint64_t *) (ctx->vtcm_base + ctx->vtcm_size);
+        uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+        htp_iq2s_grid_vtcm = (const uint64_t *) base;
+        htp_iq2s_gather_scratch_vtcm = base + IQ2S_SCRATCH_OFFSET;
         return;
     }
     if (ctx->vtcm_size <= HTP_IQ2S_GRID_VTCM_RESERVE) {
@@ -270,6 +280,8 @@ void htp_iq2s_grid_ensure(struct htp_context * ctx) {
     ctx->vtcm_size -= HTP_IQ2S_GRID_VTCM_RESERVE;
     htp_iq2s_grid_copy(ctx);
     ctx->iq2s_grid_ready = true;
+    FARF(ERROR, "ggml-hex: IQ2_S gather diag: vtcm %p codebook %p scratch %p",
+        (void *) ctx->vtcm_base, (void *) htp_iq2s_grid_vtcm, (void *) htp_iq2s_gather_scratch_vtcm);
 }
 
 // VTCM contents are lost on release; rewrite the same bytes in place

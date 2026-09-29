@@ -181,6 +181,7 @@ int op_roll(struct htp_ops_context * octx);
 
 // IQ2_S VTCM codebook management (matmul-ops.c)
 extern const uint64_t * htp_iq2s_grid_vtcm;
+extern uint8_t * htp_iq2s_gather_scratch_vtcm;
 void htp_iq2s_grid_ensure(struct htp_context * ctx);
 void htp_iq2s_grid_refresh(struct htp_context * ctx);
 
