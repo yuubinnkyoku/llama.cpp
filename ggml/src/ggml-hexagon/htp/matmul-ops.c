@@ -19,6 +19,8 @@
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
+#define GGML_COMMON_IMPL_C
+#include "ggml-common.h"
 #include "htp-ctx.h"
 #include "htp-ops.h"
 #include "htp-tensor.h"
