@@ -536,41 +536,55 @@ static inline HVX_Vector scale_q6_k_32x1(HVX_VectorPair v_sums, HVX_Vector v_sca
     return hvx_vec_add_f32_f32(v_lo, v_hi);
 }
 
-// Correctness-first IQ2_S direct dot kernels.
+// IQ2_S direct dot helpers.
 //
-// iq2s_grid only contains positive magnitudes {8,25,43}, so signed decoded
-// weights fit in int8_t.  Build one 128-byte vrmpy-ready vector for four
-// consecutive k values over 32 output rows, then reuse the same q8_0
-// activation layout and scale application as Q6_K.
+// Each IQ2_S grid entry contains eight positive int8 magnitudes.  Two adjacent
+// vrmpy groups consume the low/high four bytes of the same grid entry, so
+// decode both groups together.  This halves the codebook lookups and grid-index
+// reconstruction work versus the original correctness-first implementation.
 //
-// This intentionally leaves the IQ2_S table lookup scalar for the first device
-// correctness milestone.  It still performs the 32-row dot products with HVX
-// vrmpy; later we can replace iq2_s_unpack_group_4k() with vector lookups.
-static inline HVX_Vector iq2_s_unpack_group_4k(const uint8_t * restrict tile, int g) {
-    int8_t w[128] __attribute__((aligned(128)));
+// Sign application is branchless and works on four packed bytes at once:
+//   signed = (magnitude ^ neg_mask) + (neg_mask & 0x01010101)
+// where each byte of neg_mask is either 0x00 or 0xff.  IQ2_S magnitudes are
+// {8, 25, 43}, so the per-byte +1 cannot carry into an adjacent byte.
+static const uint32_t iq2_s_sign4_lut[16] = {
+    0x00000000u, 0x000000ffu, 0x0000ff00u, 0x0000ffffu,
+    0x00ff0000u, 0x00ff00ffu, 0x00ffff00u, 0x00ffffffu,
+    0xff000000u, 0xff0000ffu, 0xff00ff00u, 0xff00ffffu,
+    0xffff0000u, 0xffff00ffu, 0xffffff00u, 0xffffffffu,
+};
+
+static inline uint32_t iq2_s_apply_sign4(uint32_t magnitude, uint32_t sign4) {
+    const uint32_t neg = iq2_s_sign4_lut[sign4 & 0x0fu];
+    return (magnitude ^ neg) + (neg & 0x01010101u);
+}
+
+static inline HVX_VectorPair iq2_s_unpack_group_8k(const uint8_t * restrict tile, int l) {
+    uint32_t w0[32] __attribute__((aligned(128)));
+    uint32_t w1[32] __attribute__((aligned(128)));
 
     const uint8_t * indices = tile + 0;
     const uint8_t * signs   = tile + 128;
     const uint8_t * qh      = tile + 256;
 
-    const int l = g >> 1;
-    const int j0 = (g & 1) * 4;
+    const uint8_t * restrict idx_l  = indices + l * 32;
+    const uint8_t * restrict sign_l = signs   + l * 32;
+    const int qh_shift = 2 * l;
 
+    #pragma unroll(4)
     for (int row = 0; row < 32; ++row) {
         const uint32_t grid_index =
-            (uint32_t) indices[l * 32 + row] |
-            (((uint32_t) qh[row] << (8 - 2 * l)) & 0x300u);
-        const uint8_t * grid = (const uint8_t *) (iq2s_grid + grid_index);
-        const uint8_t sign_mask = signs[l * 32 + row];
+            (uint32_t) idx_l[row] |
+            (((uint32_t) qh[row] >> qh_shift & 0x03u) << 8);
 
-        for (int b = 0; b < 4; ++b) {
-            const int j = j0 + b;
-            const int v = (int) grid[j];
-            w[row * 4 + b] = (int8_t) ((sign_mask & (1u << j)) ? -v : v);
-        }
+        const uint64_t grid = iq2s_grid[grid_index];
+        const uint8_t sign_mask = sign_l[row];
+
+        w0[row] = iq2_s_apply_sign4((uint32_t) grid,        sign_mask);
+        w1[row] = iq2_s_apply_sign4((uint32_t) (grid >> 32), sign_mask >> 4);
     }
 
-    return *(const HVX_Vector *) w;
+    return Q6_W_vcombine_VV(*(const HVX_Vector *) w1, *(const HVX_Vector *) w0);
 }
 
 static inline HVX_Vector iq2_s_scale_vector(const uint8_t * restrict tile) {
@@ -598,12 +612,14 @@ static inline HVX_VectorPair accum_iq2_s_32x1(
     HVX_Vector hi = Q6_V_vzero();
 
     #pragma unroll
-    for (int g = 0; g < 8; ++g) {
-        const HVX_Vector v_w = iq2_s_unpack_group_4k(tile, g);
-        if (g < 4) {
-            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, v_w, v_act[g]);
+    for (int l = 0; l < 4; ++l) {
+        const HVX_VectorPair v_w = iq2_s_unpack_group_8k(tile, l);
+        if (l < 2) {
+            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
         } else {
-            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, v_w, v_act[g]);
+            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
         }
     }
 
@@ -623,14 +639,21 @@ static inline void accum_iq2_s_32x2(
     HVX_Vector hi1 = Q6_V_vzero();
 
     #pragma unroll
-    for (int g = 0; g < 8; ++g) {
-        const HVX_Vector v_w = iq2_s_unpack_group_4k(tile, g);
-        if (g < 4) {
-            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, v_w, v_act0[g]);
-            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, v_w, v_act1[g]);
+    for (int l = 0; l < 4; ++l) {
+        const HVX_VectorPair v_w = iq2_s_unpack_group_8k(tile, l);
+        const HVX_Vector w0 = Q6_V_lo_W(v_w);
+        const HVX_Vector w1 = Q6_V_hi_W(v_w);
+
+        if (l < 2) {
+            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w0, v_act0[2 * l + 0]);
+            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w1, v_act0[2 * l + 1]);
+            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w0, v_act1[2 * l + 0]);
+            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w1, v_act1[2 * l + 1]);
         } else {
-            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, v_w, v_act0[g]);
-            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, v_w, v_act1[g]);
+            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w0, v_act0[2 * l + 0]);
+            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w1, v_act0[2 * l + 1]);
+            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w0, v_act1[2 * l + 0]);
+            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w1, v_act1[2 * l + 1]);
         }
     }
 
