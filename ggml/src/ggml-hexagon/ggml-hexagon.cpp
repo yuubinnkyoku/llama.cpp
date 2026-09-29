@@ -5866,11 +5866,13 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
+        case GGML_TYPE_IQ2_S:
             if (!ggml_is_contiguous(src0) || ggml_is_permuted(src0)) {
                 return false;
             }
 
-            if (src0->ne[0] % ((src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q5_K || src0->type == GGML_TYPE_Q4_K) ? QK_K : 32)) {
+            if (src0->ne[0] % ((src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q5_K ||
+                                src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_IQ2_S) ? QK_K : 32)) {
                 return false;
             }
 
@@ -5919,6 +5921,13 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
 
     struct htp_mm_kernel_params kparams;
     ggml_hexagon_precompute_matmul_params(sess, src0, src1, dst, &kparams);
+
+    // IQ2_S phase 2 currently implements only the HMX prefill path.
+    // Decode/small-M must stay on CPU until tiled_vec_dot_iq2_s is added.
+    if (src0->type == GGML_TYPE_IQ2_S && !kparams.n_hmx) {
+        return false;
+    }
+
     if (kparams.kernel_type == HTP_MM_KERNEL_UNSUPPORTED || (size_t) kparams.vtcm_size > sess->vtcm_size) {
         HEX_VERBOSE("ggml-hex: %s supported MUL_MAT VTCM size needed (%d) > budget (%zu)\n", sess->c_name(), kparams.vtcm_size, sess->vtcm_size);
         return false;
@@ -6833,6 +6842,7 @@ static bool is_mergeable_mul_mat(const ggml_tensor * t) {
     const ggml_tensor * src0 = t->src[0];
     const ggml_tensor * src1 = t->src[1];
     if (src1->type != GGML_TYPE_F32) return false;
+    if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
 
     if (mm_is_hmx_eligible(t)) {
@@ -6865,7 +6875,7 @@ static bool is_mergeable_mul_mat_id(const ggml_tensor * t) {
     if (t->op != GGML_OP_MUL_MAT_ID) return false;
 
     const ggml_tensor * src0 = t->src[0];
-    return ggml_hexagon_is_repack_type(src0->type);
+    return src0->type != GGML_TYPE_IQ2_S && ggml_hexagon_is_repack_type(src0->type);
 }
 
 static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tensor * n2) {
