@@ -10257,6 +10257,29 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                              GGML_TYPE_IQ3_S, GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M, GGML_TYPE_IQ4_XS}) {
         test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 16, 10, 256, {1, 1}, {1, 1}));
     }
+
+    // IQ2_S Hexagon coverage for multi-superblock K, 32-row tile boundaries,
+    // and batched 4D tensors.  These cases are backend-agnostic tests; backends
+    // that do not support IQ2_S simply report them as unsupported.
+    //
+    // n=1 exercises the Hexagon HVX matvec path.  n=10/32 are HMX-eligible on
+    // v81 and exercise the IQ2_S -> fp16 tiled dequantization path.
+    for (int64_t k : {512, 1024, 4096, 8192}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 16,  1, k, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 16, 10, k, {1, 1}, {1, 1}));
+    }
+
+    for (int64_t m : {31, 32, 33, 63, 64, 65}) {
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, m,  1, 1024, {1, 1}, {1, 1}));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, m, 10, 1024, {1, 1}, {1, 1}));
+    }
+
+    // Exercise ne2/ne3 slices in the Hexagon host repacker.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 33,  1, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
+
+    // One larger HMX shape spanning multiple row and K tiles plus a batched slice.
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 64, 32, 4096, {2, 1}, {1, 1}));
 #else
     // m = a rows
     // n = b rows
