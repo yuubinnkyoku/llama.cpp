@@ -1,0 +1,37 @@
+name: IQ2_S Snapdragon build
+
+on:
+  push:
+    branches:
+      - hexagon-iq2s
+    paths:
+      - "ggml/src/ggml-hexagon/**"
+      - "ggml/include/ggml-hexagon.h"
+      - "docs/backend/snapdragon/**"
+      - ".github/workflows/iq2-s-snapdragon-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-snapdragon-build:
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/snapdragon-toolchain/arm64-android:v0.7
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Configure Snapdragon Android
+        run: |
+          cp docs/backend/snapdragon/CMakeUserPresets.json .
+          cmake --preset arm64-android-snapdragon-release -B build
+
+      - name: Build Snapdragon Android and HTP skels
+        run: cmake --build build -j2
