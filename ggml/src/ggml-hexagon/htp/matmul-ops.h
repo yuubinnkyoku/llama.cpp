@@ -24,6 +24,7 @@ extern "C" {
 #define HTP_MM_WEIGHT_TILE_SIZE_Q4_1   640
 #define HTP_MM_WEIGHT_TILE_SIZE_Q8_0   1088
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ4_NL 576
+#define HTP_MM_WEIGHT_TILE_SIZE_IQ2_S  384
 #define HTP_MM_WEIGHT_TILE_SIZE_MXFP4  544
 // Q5_K: the Q4_1 tile (640) followed by a 128-byte plane with the 5th bit of every quant, transposed so that
 //   plane byte l holds the eight flags of lane l: bit 2i = low nibble of nibble vector i, bit 2i+1 = high nibble
@@ -39,6 +40,7 @@ extern "C" {
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_1   640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q8_0   1152
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ4_NL 640
+#define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_S  384
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_MXFP4  640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K   768
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q6_K   896
@@ -203,6 +205,8 @@ static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
         case HTP_TYPE_Q8_0:
             return HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
+        case HTP_TYPE_IQ2_S:
+            return HTP_MM_WEIGHT_TILE_SIZE_IQ2_S;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -224,6 +228,8 @@ static inline uint32_t htp_mm_get_weight_aligned_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_1;
         case HTP_TYPE_Q8_0:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q8_0;
+        case HTP_TYPE_IQ2_S:
+            return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_S;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -261,6 +267,7 @@ static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
         case HTP_TYPE_Q4_1:
         case HTP_TYPE_Q4_K:
         case HTP_TYPE_Q8_0:
+        case HTP_TYPE_IQ2_S:
         case HTP_TYPE_Q5_K:
         case HTP_TYPE_Q6_K:
         case HTP_TYPE_MXFP4:
