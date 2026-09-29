@@ -281,6 +281,11 @@ endif()
 llama_build(test-backend-ops.cpp)
 
 llama_build_and_test(test-tiled-mulmat.cpp)
+
+if (NOT LLAMA_USE_SYSTEM_GGML)
+    llama_build_and_test(test-hexagon-iq2-s-repack.cpp)
+    target_include_directories(test-hexagon-iq2-s-repack PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+endif()
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
 llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
