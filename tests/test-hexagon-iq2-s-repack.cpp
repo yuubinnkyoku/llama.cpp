@@ -1,6 +1,10 @@
 #include "ggml.h"
 #include "ggml-quants.h"
+#include "ggml-impl.h"
 #include "ggml-hexagon/iq2-s-repack.h"
+
+#define GGML_COMMON_IMPL_CPP
+#include "ggml-common.h"
 
 #include <cmath>
 #include <cstdint>
@@ -132,6 +136,94 @@ static void test_quantized_roundtrip(int64_t ne0, int64_t ne1) {
     }
 }
 
+static void test_hmx_tile_dequant_reference() {
+    const int64_t ne0 = 256;
+    const int64_t ne1 = 32;
+
+    const size_t original_size = original_size_2d(ne0, ne1);
+    const size_t repacked_size = repacked_size_2d(ne0, ne1);
+    const size_t block_count = original_size / sizeof(block_iq2_s);
+
+    std::vector<float> source((size_t) ne0 * (size_t) ne1);
+    std::vector<float> imatrix(source.size(), 1.0f);
+    std::vector<block_iq2_s> quantized(block_count);
+    std::vector<uint8_t> repacked(repacked_size);
+
+    fill_source(source, ne0, ne1);
+    const size_t written = ggml_quantize_chunk(
+        GGML_TYPE_IQ2_S,
+        source.data(),
+        quantized.data(),
+        0,
+        ne1,
+        ne0,
+        imatrix.data());
+
+    check(written == original_size, "HMx reference fixture quantization size");
+    check(repack_2d(
+              quantized.data(), original_size,
+              ne0, ne1, repacked.data(), repacked.size()),
+          "HMX reference fixture repack succeeds");
+
+    std::vector<float> row_ref((size_t) ne0);
+    std::vector<float> hmx_tile(32 * 32);
+
+    for (int64_t kt = 0; kt < ne0 / 32; ++kt) {
+        const uint8_t * tile = repacked.data() + (size_t) kt * TILE_SIZE;
+        std::fill(hmx_tile.begin(), hmx_tile.end(), 0.0f);
+
+        const uint8_t * indices = tile + INDEX_PLANE_OFFSET;
+        const uint8_t * signs   = tile + SIGN_PLANE_OFFSET;
+        const uint8_t * qh      = tile + QH_PLANE_OFFSET;
+        const uint8_t * scales  = tile + SCALE_PLANE_OFFSET;
+        const ggml_half * d     = reinterpret_cast<const ggml_half *>(tile + D_PLANE_OFFSET);
+
+        for (int row = 0; row < 32; ++row) {
+            const float d_row = GGML_FP16_TO_FP32(d[row]);
+            const uint8_t sc = scales[row];
+
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t scale_nibble = l < 2 ? (sc & 0x0f) : (sc >> 4);
+                const float dl = d_row * (0.5f + (float) scale_nibble) * 0.25f;
+
+                const uint32_t grid_index =
+                    (uint32_t) indices[l * 32 + row] |
+                    (((uint32_t) qh[row] << (8 - 2 * l)) & 0x300u);
+                const uint8_t * grid = reinterpret_cast<const uint8_t *>(iq2s_grid + grid_index);
+                const uint8_t sign_mask = signs[l * 32 + row];
+
+                for (int j = 0; j < 8; ++j) {
+                    const int k = l * 8 + j;
+                    float w = dl * (float) grid[j];
+                    if (sign_mask & (1u << j)) {
+                        w = -w;
+                    }
+                    hmx_tile[(k / 2) * 64 + row * 2 + (k & 1)] = w;
+                }
+            }
+        }
+
+        for (int row = 0; row < 32; ++row) {
+            dequantize_row_iq2_s(
+                quantized.data() + row,
+                row_ref.data(),
+                ne0);
+
+            for (int k = 0; k < 32; ++k) {
+                const float got = hmx_tile[(k / 2) * 64 + row * 2 + (k & 1)];
+                const float ref = row_ref[(size_t) kt * 32 + k];
+                if (got != ref) {
+                    std::fprintf(stderr,
+                        "FAIL: HMX tile dequant mismatch kt=%lld row=%d k=%d ref=%g got=%g\n",
+                        (long long) kt, row, k, ref, got);
+                    ++n_failed;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 static void test_duplicate_d_validation() {
     const int64_t ne0 = 256;
     const int64_t ne1 = 1;
@@ -184,6 +276,7 @@ int main() {
         test_quantized_roundtrip(shape.first, shape.second);
     }
 
+    test_hmx_tile_dequant_reference();
     test_duplicate_d_validation();
 
     ggml_quantize_free();
