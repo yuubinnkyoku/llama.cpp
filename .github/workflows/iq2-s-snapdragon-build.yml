@@ -42,3 +42,26 @@ jobs:
 
       - name: Build v81 HTP skel
         run: cmake --build build --target htp-v81 -j2
+
+      - name: Build backend test binary
+        run: cmake --build build --target test-backend-ops -j2
+
+      - name: Collect v81 test bundle
+        run: |
+          set -euo pipefail
+          mkdir -p iq2s-v81-bundle
+          find build -type f \( \
+            -name 'test-backend-ops' -o \
+            -name 'libggml*.so' -o \
+            -name 'libggml*.so.*' \
+          \) -exec cp -L {} iq2s-v81-bundle/ \;
+          test -f iq2s-v81-bundle/test-backend-ops
+          test -f iq2s-v81-bundle/libggml-htp-v81.so
+          ls -lh iq2s-v81-bundle
+
+      - name: Upload v81 test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: iq2s-v81-${{ github.sha }}
+          path: iq2s-v81-bundle
+          if-no-files-found: error
