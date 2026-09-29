@@ -536,6 +536,12 @@ static inline HVX_Vector scale_q6_k_32x1(HVX_VectorPair v_sums, HVX_Vector v_sca
     return hvx_vec_add_f32_f32(v_lo, v_hi);
 }
 
+// IQ2_S codebook in VTCM, copied by htp_iq2s_grid_ensure() (matmul-ops.c).
+// NULL keeps the scalar .rodata lookup path.
+#define IQ2S_GRID_BYTES 8192
+#define IQ2S_LUT_BYTES  64
+extern const uint64_t * htp_iq2s_grid_vtcm;
+
 // IQ2_S direct dot helpers.
 //
 // Each IQ2_S grid entry contains eight positive int8 magnitudes.  Two adjacent
@@ -559,7 +565,59 @@ static inline uint32_t iq2_s_apply_sign4(uint32_t magnitude, uint32_t sign4) {
     return (magnitude ^ neg) + (neg & 0x01010101u);
 }
 
+// VTCM gather path: one 32-row word vector pair per group, built from the
+// copied codebook with Q6_vgather instead of scalar .rodata loads.
+static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restrict tile, int l) {
+    const size_t grid_rt = (size_t) htp_iq2s_grid_vtcm;
+    const size_t lut_rt  = grid_rt + IQ2S_GRID_BYTES;
+    const uint32_t grid_mu = IQ2S_GRID_BYTES;
+    const uint32_t lut_mu  = IQ2S_LUT_BYTES;
+
+    const HVX_Vector v_idx  = hvx_vmemu(tile + 0   + l * 32);
+    const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
+    const HVX_Vector v_qh   = hvx_vmemu(tile + 256);
+
+    // grid byte offset = 8 * (idx + ((qh >> 2l) & 3) * 256)
+    HVX_Vector v_off = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+        Q6_V_vand_VV(Q6_Vub_vlsr_VubR(v_qh, 2 * l), Q6_Vb_vsplat_R(3))))));
+    v_off = Q6_Vw_vasl_VwR(v_off, 8);                     // high index bits * 256
+    HVX_Vector v_idx_w = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_idx))));
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_idx_w);              // full grid index
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *2
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *4
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *8 -> byte offset
+    const HVX_Vector v_off_hi = Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4));
+
+    // sign LUT word offset = 4 * nibble (low nibble feeds w0, high feeds w1)
+    HVX_Vector v_off_s0 = Q6_Vw_vasl_VwR(
+        Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+            Q6_V_vand_VV(v_sign, Q6_Vb_vsplat_R(0x0f)))))), 2);
+    HVX_Vector v_off_s1 = Q6_Vw_vasl_VwR(
+        Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+            Q6_Vub_vlsr_VubR(v_sign, 4))))), 2);
+
+    HVX_Vector g0 __attribute__((aligned(128)));
+    HVX_Vector g1 __attribute__((aligned(128)));
+    HVX_Vector n0 __attribute__((aligned(128)));
+    HVX_Vector n1 __attribute__((aligned(128)));
+
+    Q6_vgather_ARMVw(&g0, grid_rt, grid_mu, v_off);       // low 4 magnitudes
+    Q6_vgather_ARMVw(&g1, grid_rt, grid_mu, v_off_hi);    // high 4 magnitudes
+    Q6_vgather_ARMVw(&n0, lut_rt, lut_mu, v_off_s0);
+    Q6_vgather_ARMVw(&n1, lut_rt, lut_mu, v_off_s1);
+
+    const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
+    const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g0, n0), Q6_V_vand_VV(n0, v_ones));
+    const HVX_Vector v_w1 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g1, n1), Q6_V_vand_VV(n1, v_ones));
+
+    return Q6_W_vcombine_VV(v_w1, v_w0);
+}
+
 static inline HVX_VectorPair iq2_s_unpack_group_8k(const uint8_t * restrict tile, int l) {
+    if (htp_iq2s_grid_vtcm) {
+        return iq2_s_unpack_group_8k_gather(tile, l);
+    }
+
     uint32_t w0[32] __attribute__((aligned(128)));
     uint32_t w1[32] __attribute__((aligned(128)));
 

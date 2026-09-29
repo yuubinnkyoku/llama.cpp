@@ -243,6 +243,42 @@ static const uint8_t __attribute__((aligned(VLEN))) kvalues_mxfp4_lut[] = {
 #include "hvx-mm-kernels-float.h"
 #include "hmx-mm-kernels-tiled.h"
 
+// IQ2_S codebook copy in VTCM. Placed at the top of ctx->vtcm_size after a
+// HTP_IQ2S_GRID_VTCM_RESERVE shrink. NULL selects the scalar lookup path.
+const uint64_t * htp_iq2s_grid_vtcm = NULL;
+
+_Static_assert(sizeof(iq2s_grid) == IQ2S_GRID_BYTES, "IQ2S_GRID_BYTES mismatch");
+_Static_assert(sizeof(iq2_s_sign4_lut) == IQ2S_LUT_BYTES, "IQ2S_LUT_BYTES mismatch");
+
+static void htp_iq2s_grid_copy(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    memcpy(base, iq2s_grid, IQ2S_GRID_BYTES);
+    memcpy(base + IQ2S_GRID_BYTES, iq2_s_sign4_lut, IQ2S_LUT_BYTES);
+    htp_iq2s_grid_vtcm = (const uint64_t *) base;
+}
+
+// Called from the single-threaded matmul setup path before worker threads run
+void htp_iq2s_grid_ensure(struct htp_context * ctx) {
+    if (ctx->iq2s_grid_ready) {
+        htp_iq2s_grid_vtcm = (const uint64_t *) (ctx->vtcm_base + ctx->vtcm_size);
+        return;
+    }
+    if (ctx->vtcm_size <= HTP_IQ2S_GRID_VTCM_RESERVE) {
+        FARF(ERROR, "ggml-hex: VTCM too small for the IQ2_S codebook region");
+        return;
+    }
+    ctx->vtcm_size -= HTP_IQ2S_GRID_VTCM_RESERVE;
+    htp_iq2s_grid_copy(ctx);
+    ctx->iq2s_grid_ready = true;
+}
+
+// VTCM contents are lost on release; rewrite the same bytes in place
+void htp_iq2s_grid_refresh(struct htp_context * ctx) {
+    if (ctx->iq2s_grid_ready) {
+        htp_iq2s_grid_copy(ctx);
+    }
+}
+
 // Specialized repacked matmul macros
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
 static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void * data) {                                                 \
@@ -1634,6 +1670,10 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
     mmctx->act = src1;
 
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
+
+    if (octx->flags & HTP_OPFLAGS_IQ2S_GATHER) {
+        htp_iq2s_grid_ensure(octx->ctx);
+    }
 
     const uint32_t src0_nrows = ne01;
     const uint32_t src1_nrows = ne11 * ne12 * ne13;
@@ -3871,6 +3911,10 @@ static int hvx_mm_matmul_id(
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
     const struct htp_tensor * restrict ids = octx->src[2];
     const size_t src0_row_size = nb01;
+
+    if (octx->flags & HTP_OPFLAGS_IQ2S_GATHER) {
+        htp_iq2s_grid_ensure(octx->ctx);
+    }
 
     const uint32_t qk = QK_Q8_0_TILED;
     const uint32_t nb = (ne10 + qk - 1) / qk;

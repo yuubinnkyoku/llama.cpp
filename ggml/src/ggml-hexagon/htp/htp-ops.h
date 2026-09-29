@@ -163,8 +163,12 @@ struct htp_buf_desc {
 };
 
 enum htp_op_flags {
-    HTP_OPFLAGS_STUB  = (1U << 0),
+    HTP_OPFLAGS_STUB        = (1U << 0),
+    HTP_OPFLAGS_IQ2S_GATHER = (1U << 1),
 };
+
+// top-of-VTCM region reserved for the IQ2_S codebook (iq2s_grid + sign LUT)
+#define HTP_IQ2S_GRID_VTCM_RESERVE (128 * 1024)
 
 // Op descriptor
 struct htp_op_desc {

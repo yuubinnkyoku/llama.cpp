@@ -107,6 +107,9 @@ struct htp_context {
     atomic_bool            vtcm_valid;
     atomic_bool            vtcm_needs_release;
 
+    // IQ2_S codebook region at the top of VTCM (see matmul-ops.c)
+    bool                   iq2s_grid_ready;
+
     uint64_t               max_vmem;
     struct htp_dirty_range dirty_ranges[HTP_MAX_DIRTY_RANGES];
 
@@ -175,5 +178,9 @@ int op_pad(struct htp_ops_context * octx);
 int op_im2col(struct htp_ops_context * octx);
 int op_allreduce(struct htp_ops_context * octx);
 int op_roll(struct htp_ops_context * octx);
+
+// IQ2_S VTCM codebook management (matmul-ops.c)
+void htp_iq2s_grid_ensure(struct htp_context * ctx);
+void htp_iq2s_grid_refresh(struct htp_context * ctx);
 
 #endif /* HTP_CTX_H */
