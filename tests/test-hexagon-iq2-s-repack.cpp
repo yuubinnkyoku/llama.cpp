@@ -43,26 +43,28 @@ static void test_raw_roundtrip(int64_t ne0, int64_t ne1) {
     const size_t original_size = original_size_2d(ne0, ne1);
     const size_t repacked_size = repacked_size_2d(ne0, ne1);
 
-    std::vector<uint8_t> original(original_size);
+    const size_t block_count = original_size / sizeof(block_iq2_s);
+    std::vector<block_iq2_s> original(block_count);
     std::vector<uint8_t> repacked(repacked_size);
-    std::vector<uint8_t> roundtrip(original_size);
+    std::vector<block_iq2_s> roundtrip(block_count);
 
     uint32_t rng = 0x6d2b79f5u ^ (uint32_t) ne0 ^ ((uint32_t) ne1 << 16);
-    for (uint8_t & v : original) {
-        v = (uint8_t) xorshift32(rng);
+    uint8_t * original_bytes = reinterpret_cast<uint8_t *>(original.data());
+    for (size_t i = 0; i < original_size; ++i) {
+        original_bytes[i] = (uint8_t) xorshift32(rng);
     }
 
     check(repack_2d(
-              reinterpret_cast<const block_iq2_s *>(original.data()), original.size(),
+              original.data(), original_size,
               ne0, ne1, repacked.data(), repacked.size()),
           "raw repack succeeds");
 
     check(unpack_2d(
               repacked.data(), repacked.size(), ne0, ne1,
-              reinterpret_cast<block_iq2_s *>(roundtrip.data()), roundtrip.size()),
+              roundtrip.data(), original_size),
           "raw unpack succeeds");
 
-    check(std::memcmp(original.data(), roundtrip.data(), original.size()) == 0,
+    check(std::memcmp(original.data(), roundtrip.data(), original_size) == 0,
           "raw IQ2_S bytes survive repack -> unpack exactly");
 }
 
@@ -83,9 +85,10 @@ static void test_quantized_roundtrip(int64_t ne0, int64_t ne1) {
 
     std::vector<float> source((size_t) ne0 * (size_t) ne1);
     std::vector<float> imatrix(source.size(), 1.0f);
-    std::vector<uint8_t> quantized(original_size);
+    const size_t block_count = original_size / sizeof(block_iq2_s);
+    std::vector<block_iq2_s> quantized(block_count);
     std::vector<uint8_t> repacked(repacked_size);
-    std::vector<uint8_t> roundtrip(original_size);
+    std::vector<block_iq2_s> roundtrip(block_count);
 
     fill_source(source, ne0, ne1);
 
@@ -98,19 +101,19 @@ static void test_quantized_roundtrip(int64_t ne0, int64_t ne1) {
         ne0,
         imatrix.data());
 
-    check(written == quantized.size(), "ggml_quantize_chunk wrote expected IQ2_S byte count");
+    check(written == original_size, "ggml_quantize_chunk wrote expected IQ2_S byte count");
 
     check(repack_2d(
-              reinterpret_cast<const block_iq2_s *>(quantized.data()), quantized.size(),
+              quantized.data(), original_size,
               ne0, ne1, repacked.data(), repacked.size()),
           "quantized repack succeeds");
 
     check(unpack_2d(
               repacked.data(), repacked.size(), ne0, ne1,
-              reinterpret_cast<block_iq2_s *>(roundtrip.data()), roundtrip.size()),
+              roundtrip.data(), original_size),
           "quantized unpack succeeds");
 
-    check(std::memcmp(quantized.data(), roundtrip.data(), quantized.size()) == 0,
+    check(std::memcmp(quantized.data(), roundtrip.data(), original_size) == 0,
           "valid IQ2_S bytes survive repack -> unpack exactly");
 
     const int64_t blocks_per_row = ne0 / QK_K;
@@ -118,10 +121,8 @@ static void test_quantized_roundtrip(int64_t ne0, int64_t ne1) {
     std::vector<float> deq_b((size_t) ne0);
 
     for (int64_t r = 0; r < ne1; ++r) {
-        const block_iq2_s * a =
-            reinterpret_cast<const block_iq2_s *>(quantized.data()) + r * blocks_per_row;
-        const block_iq2_s * b =
-            reinterpret_cast<const block_iq2_s *>(roundtrip.data()) + r * blocks_per_row;
+        const block_iq2_s * a = quantized.data() + r * blocks_per_row;
+        const block_iq2_s * b = roundtrip.data() + r * blocks_per_row;
 
         dequantize_row_iq2_s(a, deq_a.data(), ne0);
         dequantize_row_iq2_s(b, deq_b.data(), ne0);
@@ -135,17 +136,18 @@ static void test_duplicate_d_validation() {
     const int64_t ne0 = 256;
     const int64_t ne1 = 1;
 
-    std::vector<uint8_t> original(original_size_2d(ne0, ne1), 0);
+    std::vector<block_iq2_s> original(1);
     std::vector<uint8_t> repacked(repacked_size_2d(ne0, ne1), 0);
-    std::vector<uint8_t> roundtrip(original.size(), 0);
+    std::vector<block_iq2_s> roundtrip(1);
 
     uint32_t rng = 0x12345678u;
-    for (uint8_t & v : original) {
-        v = (uint8_t) xorshift32(rng);
+    uint8_t * original_bytes = reinterpret_cast<uint8_t *>(original.data());
+    for (size_t i = 0; i < sizeof(block_iq2_s); ++i) {
+        original_bytes[i] = (uint8_t) xorshift32(rng);
     }
 
     check(repack_2d(
-              reinterpret_cast<const block_iq2_s *>(original.data()), original.size(),
+              original.data(), sizeof(block_iq2_s),
               ne0, ne1, repacked.data(), repacked.size()),
           "corruption test repack succeeds");
 
@@ -155,7 +157,7 @@ static void test_duplicate_d_validation() {
 
     check(!unpack_2d(
               repacked.data(), repacked.size(), ne0, ne1,
-              reinterpret_cast<block_iq2_s *>(roundtrip.data()), roundtrip.size()),
+              roundtrip.data(), sizeof(block_iq2_s)),
           "unpack rejects inconsistent duplicated d");
 }
 
