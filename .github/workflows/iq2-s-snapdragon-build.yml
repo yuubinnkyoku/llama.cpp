@@ -10,6 +10,7 @@ on:
       - "docs/backend/snapdragon/**"
       - "tests/test-backend-ops.cpp"
       - "scripts/snapdragon/test-iq2-s.sh"
+      - "scripts/snapdragon/test-iq2-s.ps1"
       - ".github/workflows/iq2-s-snapdragon-build.yml"
   workflow_dispatch:
 
