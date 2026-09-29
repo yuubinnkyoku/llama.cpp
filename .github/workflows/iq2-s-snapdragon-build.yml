@@ -37,5 +37,8 @@ jobs:
           cp docs/backend/snapdragon/CMakeUserPresets.json .
           cmake --preset arm64-android-snapdragon-release -B build
 
-      - name: Build Snapdragon Android and HTP skels
-        run: cmake --build build -j2
+      - name: Build Snapdragon Android backend
+        run: cmake --build build --target ggml-hexagon -j2
+
+      - name: Build v81 HTP skel
+        run: cmake --build build --target htp-v81 -j2
