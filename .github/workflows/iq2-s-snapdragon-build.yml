@@ -8,6 +8,8 @@ on:
       - "ggml/src/ggml-hexagon/**"
       - "ggml/include/ggml-hexagon.h"
       - "docs/backend/snapdragon/**"
+      - "tests/test-backend-ops.cpp"
+      - "scripts/snapdragon/test-iq2-s.sh"
       - ".github/workflows/iq2-s-snapdragon-build.yml"
   workflow_dispatch:
 
