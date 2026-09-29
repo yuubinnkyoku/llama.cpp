@@ -861,6 +861,7 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
 MATMUL_4D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x2,  tiled_vec_dot_q4_0_32x1)
 MATMUL_4D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x2,  tiled_vec_dot_q4_1_32x1)
 MATMUL_4D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_dot_q8_0_32x1)
+MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  tiled_vec_dot_iq2_s_32x2, tiled_vec_dot_iq2_s_32x1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -1688,6 +1689,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_Q4_1:
                 case HTP_TYPE_Q4_K:   matmul_job_func = hvx_mm_4d_repacked_q4_1;   break;
                 case HTP_TYPE_Q8_0:   matmul_job_func = hvx_mm_4d_repacked_q8_0;   break;
+                case HTP_TYPE_IQ2_S:  matmul_job_func = hvx_mm_4d_repacked_iq2_s;  break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_4d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_4d_repacked_q5_k;   break;
                 case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mm_4d_repacked_iq4nl;  break;
