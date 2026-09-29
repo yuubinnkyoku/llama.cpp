@@ -351,6 +351,7 @@ static int vtcm_alloc(struct htp_context * ctx) {
     ctx->vtcm_valid         = false;
     ctx->vtcm_needs_release = false;
     ctx->iq2s_grid_ready    = false;
+    htp_iq2s_grid_vtcm      = NULL;
 
     return 0;
 }
