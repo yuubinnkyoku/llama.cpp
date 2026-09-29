@@ -611,6 +611,64 @@ static void dequantize_tiled_weight_to_fp16_task_q5_k(
     }
 }
 
+// Correctness-first IQ2_S dequantizer for the HMX prefill path.
+//
+// The phase-1 IQ2_S repack stores one 32x32 weight tile in 384 bytes:
+//   0..127   low 8-bit grid indices [4][32]
+//   128..255 sign masks           [4][32]
+//   256..287 qh                   [32]
+//   288..319 scales               [32]
+//   320..383 d                    [32] as fp16
+//
+// The output layout matches the existing HMX fp16 tile convention used by the
+// Q4/Q5/Q6 dequantizers: one 128-byte vector represents two adjacent k columns
+// over 32 rows, i.e. dst[(k/2)*64 + row*2 + (k&1)].
+//
+// This is intentionally scalar C for the first correctness milestone.  Once it
+// is validated on device, the table lookup/sign/scale work can be replaced by
+// HVX shuffles and vector lookup instructions without changing the host layout.
+static void dequantize_tiled_weight_to_fp16_task_iq2_s(
+        const tiled_dequantize_state_t *state,
+        uint32_t start_tile, uint32_t end_tile) {
+
+    for (uint32_t t = start_tile; t < end_tile; t++) {
+        const uint8_t * tile_src = state->src + t * state->aligned_tile_size;
+        __fp16 * dst_ptr = state->dst + t * HTP_MM_HMX_TILE_N_ELMS;
+
+        const uint8_t * indices = tile_src + 0;
+        const uint8_t * signs   = tile_src + 128;
+        const uint8_t * qh      = tile_src + 256;
+        const uint8_t * scales  = tile_src + 288;
+        const __fp16  * d       = (const __fp16 *) (tile_src + 320);
+
+        for (uint32_t row = 0; row < HTP_MM_HMX_TILE_N_ROWS; ++row) {
+            const float d_row = (float) d[row];
+            const uint8_t sc = scales[row];
+
+            for (uint32_t l = 0; l < 4; ++l) {
+                const uint8_t scale_nibble = (l < 2) ? (sc & 0x0f) : (sc >> 4);
+                const float dl = d_row * (0.5f + (float) scale_nibble) * 0.25f;
+
+                const uint32_t grid_index =
+                    (uint32_t) indices[l * 32 + row] |
+                    (((uint32_t) qh[row] << (8 - 2 * l)) & 0x300u);
+                const uint8_t * grid = (const uint8_t *) (iq2s_grid + grid_index);
+                const uint8_t sign_mask = signs[l * 32 + row];
+
+                for (uint32_t j = 0; j < 8; ++j) {
+                    const uint32_t k = l * 8 + j;
+                    float w = dl * (float) grid[j];
+                    if (sign_mask & (1u << j)) {
+                        w = -w;
+                    }
+
+                    dst_ptr[(k / 2) * 64 + row * 2 + (k & 1)] = (__fp16) w;
+                }
+            }
+        }
+    }
+}
+
 // Q6_K stores 6-bit weights and one fp16 scale per 16 k, see HTP_MM_WEIGHT_TILE_SIZE_Q6_K.
 // A k-group holds 4 k per row, the HMX tile holds 2, so each group is dealt into two tiles.
 static void dequantize_tiled_weight_to_fp16_task_q6_k(
