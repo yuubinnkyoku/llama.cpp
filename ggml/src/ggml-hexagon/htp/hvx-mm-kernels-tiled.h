@@ -588,20 +588,45 @@ static inline HVX_VectorPair iq2_s_unpack_group_8k(const uint8_t * restrict tile
 }
 
 static inline HVX_Vector iq2_s_scale_vector(const uint8_t * restrict tile) {
-    __fp16 scale[64] __attribute__((aligned(128)));
+    // scales[] packs two 4-bit multipliers per row.  Build the 64 fp16 weight
+    // scales entirely in HVX:
+    //   scale = d * (nibble + 0.5) * 0.25
+    //
+    // Only the first 32 bytes of v_sc_raw are scales.  After widening bytes
+    // to halfwords, those 32 values occupy the low 64 bytes of each vector.
+    // Put low nibbles in the first 32 fp16 lanes and high nibbles in the
+    // second 32 lanes, matching scale_q6_k_32x1().
+    const HVX_Vector mask_h4 = Q6_Vb_vsplat_R(0x0f);
+    const HVX_Vector v_sc_raw = hvx_vmemu(tile + 288);
 
-    const uint8_t * scales = tile + 288;
-    const __fp16 * d = (const __fp16 *) (tile + 320);
+    const HVX_Vector v_sc_lo_b = Q6_V_vand_VV(v_sc_raw, mask_h4);
+    const HVX_Vector v_sc_hi_b = Q6_Vub_vlsr_VubR(v_sc_raw, 4);
 
-    for (int row = 0; row < 32; ++row) {
-        const float df = (float) d[row];
-        const uint8_t sc = scales[row];
+    const HVX_Vector v_sc_lo_h = Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_sc_lo_b));
+    const HVX_Vector v_sc_hi_h = Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_sc_hi_b));
 
-        scale[row]      = (__fp16) (df * (0.5f + (float) (sc & 0x0f)) * 0.25f);
-        scale[32 + row] = (__fp16) (df * (0.5f + (float) (sc >> 4))   * 0.25f);
-    }
+    const HVX_VectorPred q_low64 = Q6_Q_vsetq2_R(64);
+    const HVX_Vector v_nibble_h = Q6_V_vmux_QVV(
+        q_low64,
+        v_sc_lo_h,
+        Q6_V_vror_VR(v_sc_hi_h, 64));
 
-    return *(const HVX_Vector *) scale;
+    const HVX_Vector v_nibble_hf = Q6_Vhf_equals_Vh(v_nibble_h);
+    const HVX_Vector v_half      = hvx_vec_splat_f16((__fp16) 0.5f);
+    const HVX_Vector v_quarter   = hvx_vec_splat_f16((__fp16) 0.25f);
+    const HVX_Vector v_factor = hvx_vec_mul_f16_f16(
+        hvx_vec_add_f16_f16(v_nibble_hf, v_half),
+        v_quarter);
+
+    // d[] contains 32 fp16 values (64 bytes).  Duplicate that lower half into
+    // both 32-lane halves so it lines up with the low/high scale nibbles.
+    const HVX_Vector v_d_raw = hvx_vmemu(tile + 320);
+    const HVX_Vector v_d = Q6_V_vmux_QVV(
+        q_low64,
+        v_d_raw,
+        Q6_V_vror_VR(v_d_raw, 64));
+
+    return hvx_vec_mul_f16_f16(v_d, v_factor);
 }
 
 static inline HVX_VectorPair accum_iq2_s_32x1(
