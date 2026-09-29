@@ -31,6 +31,23 @@ static uint32_t xorshift32(uint32_t & state) {
     return state;
 }
 
+static void test_grid_range() {
+    uint8_t min_v = 0xff;
+    uint8_t max_v = 0;
+
+    for (size_t i = 0; i < 1024; ++i) {
+        const uint8_t * grid = reinterpret_cast<const uint8_t *>(iq2s_grid + i);
+        for (int j = 0; j < 8; ++j) {
+            min_v = std::min(min_v, grid[j]);
+            max_v = std::max(max_v, grid[j]);
+        }
+    }
+
+    check(min_v == 8, "IQ2_S grid minimum stays 8");
+    check(max_v == 43, "IQ2_S grid maximum stays 43");
+    check(max_v <= 127, "IQ2_S grid magnitudes fit signed int8 for HVX vrmpy");
+}
+
 static void test_sizes() {
     check(original_size_2d(256, 32) == 32u * sizeof(block_iq2_s),
           "original size for 32x256");
@@ -254,6 +271,7 @@ static void test_duplicate_d_validation() {
 }
 
 int main() {
+    test_grid_range();
     test_sizes();
 
     for (const auto & shape : std::vector<std::pair<int64_t, int64_t>> {
