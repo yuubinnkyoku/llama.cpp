@@ -508,7 +508,8 @@ static inline void htp_mm_hvx_vtcm_layout_build(
     const bool is_repack = (wtype == HTP_TYPE_Q4_0 || wtype == HTP_TYPE_Q4_1 ||
                             wtype == HTP_TYPE_Q8_0 || wtype == HTP_TYPE_IQ4_NL ||
                             wtype == HTP_TYPE_MXFP4 || wtype == HTP_TYPE_Q6_K ||
-                            wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K);
+                            wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K ||
+                            wtype == HTP_TYPE_IQ2_S);
 
     if (is_fused_nx) {
         const size_t src0_row_size_padded = hex_round_up(src0_row_size, 128);
