@@ -5922,12 +5922,6 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
     struct htp_mm_kernel_params kparams;
     ggml_hexagon_precompute_matmul_params(sess, src0, src1, dst, &kparams);
 
-    // IQ2_S phase 2 currently implements only the HMX prefill path.
-    // Decode/small-M must stay on CPU until tiled_vec_dot_iq2_s is added.
-    if (src0->type == GGML_TYPE_IQ2_S && !kparams.n_hmx) {
-        return false;
-    }
-
     if (kparams.kernel_type == HTP_MM_KERNEL_UNSUPPORTED || (size_t) kparams.vtcm_size > sess->vtcm_size) {
         HEX_VERBOSE("ggml-hex: %s supported MUL_MAT VTCM size needed (%d) > budget (%zu)\n", sess->c_name(), kparams.vtcm_size, sess->vtcm_size);
         return false;
