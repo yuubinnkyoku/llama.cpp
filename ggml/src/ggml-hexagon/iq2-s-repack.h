@@ -98,7 +98,9 @@ inline bool repack_2d(
         return false;
     }
 
-    std::memset(dst, 0, expected_dst);
+    if (expected_dst != 0) {
+        std::memset(dst, 0, expected_dst);
+    }
 
     const int64_t superblocks_per_row = ne0 / QK_K;
     const int64_t n_k_tiles = ne0 / TILE_COLS;
@@ -155,7 +157,9 @@ inline bool unpack_2d(
         return false;
     }
 
-    std::memset(dst, 0, expected_dst);
+    if (expected_dst != 0) {
+        std::memset(dst, 0, expected_dst);
+    }
 
     const int64_t superblocks_per_row = ne0 / QK_K;
     const int64_t n_k_tiles = ne0 / TILE_COLS;
