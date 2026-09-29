@@ -1,0 +1,35 @@
+name: IQ2_S phase-1
+
+on:
+  push:
+    branches:
+      - hexagon-iq2s
+    paths:
+      - "ggml/src/ggml-hexagon/iq2-s-repack.h"
+      - "tests/test-hexagon-iq2-s-repack.cpp"
+      - "tests/CMakeLists.txt"
+      - "docs/backend/snapdragon/iq2-s-repack.md"
+      - ".github/workflows/iq2-s-phase1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DLLAMA_BUILD_TESTS=ON
+          -DGGML_NATIVE=OFF
+
+      - name: Build IQ2_S phase-1 test
+        run: cmake --build build --target test-hexagon-iq2-s-repack -j2
+
+      - name: Run IQ2_S phase-1 test
+        run: ctest --test-dir build -R '^test-hexagon-iq2-s-repack$' --output-on-failure
