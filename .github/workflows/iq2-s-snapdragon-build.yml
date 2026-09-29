@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: iq2-s-snapdragon-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   android-snapdragon-build:
     runs-on: ubuntu-24.04
