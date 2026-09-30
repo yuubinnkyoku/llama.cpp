@@ -90,6 +90,13 @@ struct htp_mm_context {
          const void * restrict vy, uint32_t valid_rows,
          const float * restrict sz);
 
+    // IQ2_S variant carries the flag-gated VTCM gather state
+    void (*vec_dot_32x1_iq2s)(const uint32_t n, float * restrict s,
+         const void * restrict vx,
+         const void * restrict vy, uint32_t valid_rows,
+         const float * restrict sz,
+         const uint64_t * grid, HVX_Vector * restrict scratch);
+
     // Precomputed values
     uint32_t src0_nrows_per_thread;
     uint32_t src0_row_start;
@@ -244,33 +251,32 @@ static const uint8_t __attribute__((aligned(VLEN))) kvalues_mxfp4_lut[] = {
 #include "hmx-mm-kernels-tiled.h"
 
 // IQ2_S codebook copy in VTCM. Placed at the top of ctx->vtcm_size after a
-// HTP_IQ2S_GRID_VTCM_RESERVE shrink. NULL selects the scalar lookup path.
-const uint64_t * htp_iq2s_grid_vtcm = NULL;
+// HTP_IQ2S_GRID_VTCM_RESERVE shrink. The codebook and the per-thread gather
+// scratch are owned by htp_context; NULL grid/scratch selects the scalar path.
 
-// Fixed VTCM scratch for IQ2_S vgather results, diagnostic only.
-// Requires n_hvx=1; production must use per-thread scratch.
-uint8_t * htp_iq2s_gather_scratch_vtcm = NULL;
-
-// reserve layout: codebook + LUT, then 128-aligned gather scratch
+// reserve layout: codebook + LUT, then 128-aligned per-thread scratch
 #define IQ2S_SCRATCH_OFFSET (((IQ2S_GRID_BYTES + IQ2S_LUT_BYTES) + 127) & ~(size_t) 127)
+#define IQ2S_SCRATCH_STRIDE 512 // 4 gather vectors, keeps every slot 128-aligned
 
 _Static_assert(sizeof(iq2s_grid) == IQ2S_GRID_BYTES, "IQ2S_GRID_BYTES mismatch");
 _Static_assert(sizeof(iq2_s_sign4_lut) == IQ2S_LUT_BYTES, "IQ2S_LUT_BYTES mismatch");
+_Static_assert(IQ2S_SCRATCH_OFFSET + IQ2S_SCRATCH_STRIDE * HTP_MAX_NTHREADS <= HTP_IQ2S_GRID_VTCM_RESERVE,
+    "IQ2_S VTCM reserve too small for the gather scratch");
 
 static void htp_iq2s_grid_copy(struct htp_context * ctx) {
     uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
     memcpy(base, iq2s_grid, IQ2S_GRID_BYTES);
     memcpy(base + IQ2S_GRID_BYTES, iq2_s_sign4_lut, IQ2S_LUT_BYTES);
-    htp_iq2s_grid_vtcm = (const uint64_t *) base;
-    htp_iq2s_gather_scratch_vtcm = base + IQ2S_SCRATCH_OFFSET;
+    ctx->iq2s_grid         = (const uint64_t *) base;
+    ctx->iq2s_scratch_base = base + IQ2S_SCRATCH_OFFSET;
 }
 
 // Called from the single-threaded matmul setup path before worker threads run
 void htp_iq2s_grid_ensure(struct htp_context * ctx) {
     if (ctx->iq2s_grid_ready) {
         uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
-        htp_iq2s_grid_vtcm = (const uint64_t *) base;
-        htp_iq2s_gather_scratch_vtcm = base + IQ2S_SCRATCH_OFFSET;
+        ctx->iq2s_grid         = (const uint64_t *) base;
+        ctx->iq2s_scratch_base = base + IQ2S_SCRATCH_OFFSET;
         return;
     }
     if (ctx->vtcm_size <= HTP_IQ2S_GRID_VTCM_RESERVE) {
@@ -280,8 +286,6 @@ void htp_iq2s_grid_ensure(struct htp_context * ctx) {
     ctx->vtcm_size -= HTP_IQ2S_GRID_VTCM_RESERVE;
     htp_iq2s_grid_copy(ctx);
     ctx->iq2s_grid_ready = true;
-    FARF(ERROR, "ggml-hex: IQ2_S gather diag: vtcm %p codebook %p scratch %p",
-        (void *) ctx->vtcm_base, (void *) htp_iq2s_grid_vtcm, (void *) htp_iq2s_gather_scratch_vtcm);
 }
 
 // VTCM contents are lost on release; rewrite the same bytes in place
@@ -290,6 +294,38 @@ void htp_iq2s_grid_refresh(struct htp_context * ctx) {
         htp_iq2s_grid_copy(ctx);
     }
 }
+
+// Gather state for the IQ2_S chain. The op flag alone selects it: with the
+// flag off the helpers return NULL and the scalar .rodata path runs.
+static inline const uint64_t * htp_iq2s_grid_of(const struct htp_ops_context * octx) {
+    return (octx->flags & HTP_OPFLAGS_IQ2S_GATHER) ? octx->ctx->iq2s_grid : NULL;
+}
+
+static inline HVX_Vector * htp_iq2s_scratch_of(const struct htp_ops_context * octx, uint32_t ith) {
+    if (!(octx->flags & HTP_OPFLAGS_IQ2S_GATHER) || !octx->ctx->iq2s_scratch_base) {
+        return NULL;
+    }
+    return (HVX_Vector *) (octx->ctx->iq2s_scratch_base + (size_t) ith * IQ2S_SCRATCH_STRIDE);
+}
+
+// vec_dot dispatch for the ID paths; the IQ2_S variant carries grid + scratch
+static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t ith, const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows) {
+    if (mmctx->vec_dot_32x1_iq2s) {
+        mmctx->vec_dot_32x1_iq2s(n, s, vx, vy, valid_rows, NULL,
+                                 htp_iq2s_grid_of(mmctx->octx), htp_iq2s_scratch_of(mmctx->octx, ith));
+    } else {
+        mmctx->vec_dot_32x1(n, s, vx, vy, valid_rows, NULL);
+    }
+}
+
+// iq2_s-only DOT wrappers: append the flag-gated gather state inside the
+// shared repacked macros (their job bodies have octx and ith in scope).
+#define IQ2S_DOT_2X1(ne10, dst_ptr, w_tile, src1_col, valid_rows, src2_ptr)                    \
+    tiled_vec_dot_iq2_s_32x1(ne10, dst_ptr, w_tile, src1_col, valid_rows, src2_ptr,            \
+                             htp_iq2s_grid_of(octx), htp_iq2s_scratch_of(octx, ith))
+#define IQ2S_DOT_2X2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1) \
+    tiled_vec_dot_iq2_s_32x2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1, \
+                             htp_iq2s_grid_of(octx), htp_iq2s_scratch_of(octx, ith))
 
 // Specialized repacked matmul macros
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
@@ -593,7 +629,7 @@ static void hvx_mm_nx_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, v
 MATMUL_2D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x2,  tiled_vec_dot_q4_0_32x1)
 MATMUL_2D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x2,  tiled_vec_dot_q4_1_32x1)
 MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_dot_q8_0_32x1)
-MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  tiled_vec_dot_iq2_s_32x2, tiled_vec_dot_iq2_s_32x1)
+MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -766,7 +802,7 @@ static void quantize_f32_q8_1_tiled_block(unsigned int nth, unsigned int ith, vo
 MATVEC_2D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x1)
 MATVEC_2D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x1)
 MATVEC_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x1)
-MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  tiled_vec_dot_iq2_s_32x1)
+MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x1)
 MATVEC_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x1)
@@ -909,7 +945,7 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
 MATMUL_4D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x2,  tiled_vec_dot_q4_0_32x1)
 MATMUL_4D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x2,  tiled_vec_dot_q4_1_32x1)
 MATMUL_4D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_dot_q8_0_32x1)
-MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  tiled_vec_dot_iq2_s_32x2, tiled_vec_dot_iq2_s_32x1)
+MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -1348,7 +1384,7 @@ static void hvx_mm_id(unsigned int nth, unsigned int ith, void * data) {
                 const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + (ir1 + rm2 * ne11 + 0) * src1_stride);
                 float * restrict dst_row = (float *) (dst->data + (rm1 * nb1 + rm2 * nb2 + 0));
 
-                mmctx->vec_dot_32x1(ne10, &dst_row[ct * 32], w_tile, src1_col, valid_rows, NULL);
+                hvx_mm_vec_dot_32x1(mmctx, ith, ne10, &dst_row[ct * 32], w_tile, src1_col, valid_rows);
             }
             htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);
 
@@ -1427,7 +1463,7 @@ static void hvx_mv_id(unsigned int nth, unsigned int ith, void * data) {
             valid_rows = MIN(32, MAX(0, valid_rows));
 
             htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, ct);
-            mmctx->vec_dot_32x1(ne10, &dst_row[ct * 32], w_tile, src1_col, valid_rows, NULL);
+            hvx_mm_vec_dot_32x1(mmctx, ith, ne10, &dst_row[ct * 32], w_tile, src1_col, valid_rows);
             htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);
 
             if (push_ct < ct_end) {
@@ -1516,7 +1552,7 @@ static void hvx_mv_id_nx(unsigned int nth, unsigned int ith, void * data) {
                 valid_rows = MIN(32, MAX(0, valid_rows));
 
                 htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, ct);
-                mmctx->vec_dot_32x1(act->ne[0], &dst_row[ct * 32], w_tile, src1_col, valid_rows, NULL);
+                hvx_mm_vec_dot_32x1(mmctx, ith, act->ne[0], &dst_row[ct * 32], w_tile, src1_col, valid_rows);
                 htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);
 
                 if (push_ct < ct_end) {
@@ -1616,7 +1652,7 @@ static void hvx_mm_id_nx(unsigned int nth, unsigned int ith, void * data) {
                     const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + (ir1 + rm2 * act->ne[1]) * src1_stride);
                     float * restrict dst_row = (float *) (dst->data + (rm1 * dst->nb[1] + rm2 * dst->nb[2]));
 
-                    mmctx->vec_dot_32x1(act->ne[0], &dst_row[ct * 32], w_tile, src1_col, valid_rows, NULL);
+                    hvx_mm_vec_dot_32x1(mmctx, ith, act->ne[0], &dst_row[ct * 32], w_tile, src1_col, valid_rows);
                 }
                 htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);
 
@@ -1646,8 +1682,8 @@ static int hvx_mm_init_vec_dot(struct htp_mm_context * mmctx, enum htp_data_type
             mmctx->vec_dot_32x1 = tiled_vec_dot_q8_0_32x1;
             return 0;
         case HTP_TYPE_IQ2_S:
-            mmctx->type         = "iq2_s_tiled-f32";
-            mmctx->vec_dot_32x1 = tiled_vec_dot_iq2_s_32x1;
+            mmctx->type              = "iq2_s_tiled-f32";
+            mmctx->vec_dot_32x1_iq2s = tiled_vec_dot_iq2_s_32x1;
             return 0;
         case HTP_TYPE_Q5_K:
             mmctx->type         = "q5_k_tiled-f32";
@@ -4080,6 +4116,10 @@ static int hvx_mm_matmul_id_nx(
     const struct htp_tensor * restrict act  = octx->src[n_weights];
     const struct htp_tensor * restrict ids  = octx->src[n_weights + 1];
     const size_t src0_row_size = src0->nb[1];
+
+    if (octx->flags & HTP_OPFLAGS_IQ2S_GATHER) {
+        htp_iq2s_grid_ensure(octx->ctx);
+    }
 
     const uint32_t qk = QK_Q8_0_TILED;
     const uint32_t nb = (act->ne[0] + qk - 1) / qk;
