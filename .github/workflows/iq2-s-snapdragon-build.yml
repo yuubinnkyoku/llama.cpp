@@ -65,13 +65,16 @@ jobs:
             -name 'libggml*.so' -o \
             -name 'libggml*.so.*' -o \
             -name 'libllama*.so' -o \
-            -name 'libllama*.so.*' \
+            -name 'libllama*.so.*' -o \
+            -name 'libmtmd*.so' -o \
+            -name 'libmtmd*.so.*' \
           \) -exec cp -L {} iq2s-v81-bundle/ \;
           test -f iq2s-v81-bundle/test-backend-ops
           test -f iq2s-v81-bundle/llama-cli
           test -f iq2s-v81-bundle/llama-bench
           test -f iq2s-v81-bundle/libggml-htp-v81.so
           test -f iq2s-v81-bundle/libllama-common.so
+          test -f iq2s-v81-bundle/libmtmd.so
           ls -lh iq2s-v81-bundle
 
       - name: Upload v81 test bundle
