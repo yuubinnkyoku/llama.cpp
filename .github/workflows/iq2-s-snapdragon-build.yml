@@ -49,18 +49,27 @@ jobs:
       - name: Build backend test binary
         run: cmake --build build --target test-backend-ops -j2
 
+      - name: Build llama tools
+        run: |
+          cmake --build build --target llama-cli -j2
+          cmake --build build --target llama-bench -j2
+
       - name: Collect v81 test bundle
         run: |
           set -euo pipefail
           mkdir -p iq2s-v81-bundle
           find build -type f \( \
             -name 'test-backend-ops' -o \
+            -name 'llama-cli' -o \
+            -name 'llama-bench' -o \
             -name 'libggml*.so' -o \
             -name 'libggml*.so.*' -o \
             -name 'libllama*.so' -o \
             -name 'libllama*.so.*' \
           \) -exec cp -L {} iq2s-v81-bundle/ \;
           test -f iq2s-v81-bundle/test-backend-ops
+          test -f iq2s-v81-bundle/llama-cli
+          test -f iq2s-v81-bundle/llama-bench
           test -f iq2s-v81-bundle/libggml-htp-v81.so
           test -f iq2s-v81-bundle/libllama-common.so
           ls -lh iq2s-v81-bundle
