@@ -10283,6 +10283,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         // One larger HMX shape spanning multiple row and K tiles plus a batched slice.
         test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 64, 32, 4096, {2, 1}, {1, 1}));
     }
+
+    // IQ3_XXS tiled HVX paths: K superblocks, partial row tiles, and batched slices.
+    for (int64_t k : {512, 1024, 4096, 8192}) {
+        for (int64_t m : {16, 31, 32, 33, 63, 64, 65}) {
+            for (int64_t n : {1, 10}) {
+                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33,  1, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 64, 32, 4096, {2, 1}, {1, 1}));
 #else
     // m = a rows
     // n = b rows
