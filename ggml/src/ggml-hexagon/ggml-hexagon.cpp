@@ -53,6 +53,7 @@
 #include "ggml-quants.h"
 #include "iq2-s-repack.h"
 #include "iq2-family-repack.h"
+#include "iq3-xxs-repack.h"
 #include "htp-opnode.h"
 #include "htp-ops.h"
 #include "htp/matmul-ops.h"
@@ -273,7 +274,8 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
            type == GGML_TYPE_MXFP4 || type == GGML_TYPE_Q6_K ||
            type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K ||
            type == GGML_TYPE_IQ2_S ||
-           type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS;
+           type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
+           type == GGML_TYPE_IQ3_XXS;
 }
 
 // Size of one repacked row in the DSP tiled layout. The Q6_K, Q5_K and Q4_K tiles store uncompressed scales/mins,
@@ -294,11 +296,14 @@ static inline size_t ggml_hexagon_tiled_row_size(enum ggml_type type, int64_t ne
     if (type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS) {
         return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ2_F / 32);
     }
+    if (type == GGML_TYPE_IQ3_XXS) {
+        return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS / 32);
+    }
     return ggml_row_size(type, ne0);
 }
 
 static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
-    return type == GGML_TYPE_F16 || type == GGML_TYPE_F32 || ggml_hexagon_is_repack_type(type);
+    return type != GGML_TYPE_IQ3_XXS && (type == GGML_TYPE_F16 || type == GGML_TYPE_F32 || ggml_hexagon_is_repack_type(type));
 }
 
 struct ggml_hexagon_session;
@@ -2196,6 +2201,40 @@ static void repack_tiled_iq2f(void * data, const ggml_tensor * t, size_t offset,
     }
 }
 
+static void repack_iq3_xxs_tiled(ggml_tensor * t, const void * data, size_t size) {
+    namespace iq3 = ggml_hexagon_iq3xxs;
+    GGML_ASSERT(size >= ggml_nbytes(t));
+    const size_t raw_size = iq3::original_size_2d(t->ne[0], t->ne[1]);
+    const size_t packed_size = iq3::repacked_size_2d(t->ne[0], t->ne[1]);
+    GGML_ASSERT(raw_size && packed_size);
+    for (int64_t slice = 0; slice < t->ne[2] * t->ne[3]; ++slice) {
+        const block_iq3_xxs * src = (const block_iq3_xxs *) ((const uint8_t *) data + (size_t) slice * raw_size);
+        uint8_t * dst = (uint8_t *) t->data + (size_t) slice * packed_size;
+        GGML_ASSERT(iq3::repack_2d(src, raw_size, t->ne[0], t->ne[1], dst, packed_size));
+    }
+}
+
+static void repack_tiled_iq3_xxs(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    namespace iq3 = ggml_hexagon_iq3xxs;
+    const size_t row_size = ggml_row_size(t->type, t->ne[0]);
+    const size_t packed_size = iq3::repacked_size_2d(t->ne[0], t->ne[1]);
+    GGML_ASSERT(row_size && packed_size && offset % row_size == 0 && size % row_size == 0);
+    GGML_ASSERT(offset <= ggml_nbytes(t) && size <= ggml_nbytes(t) - offset);
+    size_t first_row = offset / row_size;
+    size_t remaining = size / row_size;
+    uint8_t * dst = (uint8_t *) data;
+    while (remaining) {
+        const size_t slice = first_row / (size_t) t->ne[1];
+        const size_t row = first_row % (size_t) t->ne[1];
+        const size_t count = (std::min)(remaining, (size_t) t->ne[1] - row);
+        const uint8_t * src = (const uint8_t *) t->data + slice * packed_size;
+        GGML_ASSERT(iq3::unpack_rows_2d(src, packed_size, t->ne[0], t->ne[1], row, count, (block_iq3_xxs *) dst, count * row_size));
+        remaining -= count;
+        first_row += count;
+        dst += count * row_size;
+    }
+}
+
 static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t size) {
     switch (tensor->type) {
         case GGML_TYPE_Q4_0:
@@ -2232,6 +2271,9 @@ static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t 
 
         case GGML_TYPE_IQ2_S:
             repack_iq2_s_tiled(tensor, data, 0, size);
+            break;
+        case GGML_TYPE_IQ3_XXS:
+            repack_iq3_xxs_tiled(tensor, data, size);
             break;
 
         case GGML_TYPE_IQ2_XS:
@@ -2358,6 +2400,9 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
 
         case GGML_TYPE_IQ2_S:
             repack_tiled_iq2_s(data, tensor, offset, size);
+            break;
+        case GGML_TYPE_IQ3_XXS:
+            repack_tiled_iq3_xxs(data, tensor, offset, size);
             break;
 
         case GGML_TYPE_IQ2_XS:
@@ -2499,6 +2544,9 @@ static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buff
 
         case GGML_TYPE_IQ2_S:
             repack_tiled_iq2_s(temp_buf.data(), tensor, offset, temp_size);
+            break;
+        case GGML_TYPE_IQ3_XXS:
+            repack_tiled_iq3_xxs(temp_buf.data(), tensor, offset, temp_size);
             break;
 
         case GGML_TYPE_IQ2_XS:
@@ -6047,13 +6095,15 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
                 return false;
             }
 
+        case GGML_TYPE_IQ3_XXS:
             if (!ggml_is_contiguous(src0) || ggml_is_permuted(src0)) {
                 return false;
             }
 
             if (src0->ne[0] % ((src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q5_K ||
                                 src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_IQ2_S ||
-                                src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) ? QK_K : 32)) {
+                                src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS ||
+                                src0->type == GGML_TYPE_IQ3_XXS) ? QK_K : 32)) {
                 return false;
             }
 
@@ -7019,6 +7069,7 @@ static bool is_mergeable_mul_mat(const ggml_tensor * t) {
     if (src1->type != GGML_TYPE_F32) return false;
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
+    if (src0->type == GGML_TYPE_IQ3_XXS) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
 
     if (mm_is_hmx_eligible(t)) {
@@ -7053,6 +7104,7 @@ static bool is_mergeable_mul_mat_id(const ggml_tensor * t) {
     const ggml_tensor * src0 = t->src[0];
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
+    if (src0->type == GGML_TYPE_IQ3_XXS) return false;
     return ggml_hexagon_is_repack_type(src0->type);
 }
 
@@ -8514,6 +8566,9 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_IQ2_XS == (unsigned int) GGML_TYPE_IQ2_XS,
                   "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_IQ3_XXS == (unsigned int) GGML_TYPE_IQ3_XXS,
+                  "please update hexagon_type to match ggml_type");
+    static_assert(HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS == ggml_hexagon_iq3xxs::TILE_SIZE, "IQ3_XXS host/DSP tile size mismatch");
 
     const char * str_verbose  = getenv("GGML_HEXAGON_VERBOSE");
     const char * str_opbatch  = getenv("GGML_HEXAGON_OPBATCH");

@@ -723,7 +723,7 @@ int main() {
     ggml_quantize_free();
 
     if (n_failed == 0) {
-std::printf("PASS: IQ2_S / IQ2_XS / IQ2_XXS / IQ3_XXS repack tests\n");
+        std::printf("PASS: IQ2_S / IQ2_XS / IQ2_XXS / IQ3_XXS repack tests\n");
     } else {
         std::fprintf(stderr, "%d repack test(s) failed\n", n_failed);
     }

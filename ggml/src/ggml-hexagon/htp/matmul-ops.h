@@ -27,6 +27,7 @@ extern "C" {
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ2_S  384
 // IQ2_XS / IQ2_XXS reuse the IQ2_S tile shape (see iq2-family-repack.h)
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ2_F  384
+#define HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS 512
 #define HTP_MM_WEIGHT_TILE_SIZE_MXFP4  544
 // Q5_K: the Q4_1 tile (640) followed by a 128-byte plane with the 5th bit of every quant, transposed so that
 //   plane byte l holds the eight flags of lane l: bit 2i = low nibble of nibble vector i, bit 2i+1 = high nibble
@@ -44,6 +45,7 @@ extern "C" {
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ4_NL 640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_S  384
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_F  384
+#define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ3_XXS 512
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_MXFP4  640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K   768
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q6_K   896
@@ -213,6 +215,8 @@ static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
         case HTP_TYPE_IQ2_XS:
         case HTP_TYPE_IQ2_XXS:
             return HTP_MM_WEIGHT_TILE_SIZE_IQ2_F;
+        case HTP_TYPE_IQ3_XXS:
+            return HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -239,6 +243,8 @@ static inline uint32_t htp_mm_get_weight_aligned_tile_size(int weight_type) {
         case HTP_TYPE_IQ2_XS:
         case HTP_TYPE_IQ2_XXS:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_F;
+        case HTP_TYPE_IQ3_XXS:
+            return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ3_XXS;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -279,6 +285,7 @@ static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
         case HTP_TYPE_IQ2_S:
         case HTP_TYPE_IQ2_XS:
         case HTP_TYPE_IQ2_XXS:
+        case HTP_TYPE_IQ3_XXS:
         case HTP_TYPE_Q5_K:
         case HTP_TYPE_Q6_K:
         case HTP_TYPE_MXFP4:
@@ -521,7 +528,8 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                             wtype == HTP_TYPE_MXFP4 || wtype == HTP_TYPE_Q6_K ||
                             wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K ||
                             wtype == HTP_TYPE_IQ2_S ||
-                            wtype == HTP_TYPE_IQ2_XS || wtype == HTP_TYPE_IQ2_XXS);
+                            wtype == HTP_TYPE_IQ2_XS || wtype == HTP_TYPE_IQ2_XXS ||
+                            wtype == HTP_TYPE_IQ3_XXS);
 
     if (is_fused_nx) {
         const size_t src0_row_size_padded = hex_round_up(src0_row_size, 128);
