@@ -811,6 +811,42 @@ static void tiled_vec_dot_iq2_s_32x2(const uint32_t n, float * restrict s0, floa
     }
 }
 
+static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
+    const uint8_t * weights = vx;
+    const uint8_t * activation = vy;
+    for (uint32_t row = 0; row < valid_rows; ++row) {
+        float sum = 0.0f;
+        for (uint32_t kt = 0; kt < n / 32; ++kt) {
+            const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+            const int8_t * act = (const int8_t *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+            uint32_t aux;
+            __fp16 d, da;
+            // Hexagon reads little-endian aux words, as the GGUF CPU reference does.
+            memcpy(&aux, tile + 256 + 4 * row, sizeof(aux));
+            memcpy(&d, tile + 384 + 2 * row, sizeof(d));
+            memcpy(&da, act + 1024, sizeof(da));
+            const float db = (float) d * (0.5f + (aux >> 28)) * 0.5f;
+            int32_t dot = 0;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t signs = ksigns_iq2xs[(aux >> (7 * l)) & 127];
+                for (int j = 0; j < 8; ++j) {
+                    const uint32_t grid = iq3xxs_grid[tile[(2 * l + j / 4) * 32 + row]];
+                    const int magnitude = (grid >> (8 * (j % 4))) & 255;
+                    const int weight = (signs & (1u << j)) ? -magnitude : magnitude;
+                    dot += weight * act[(2 * l + j / 4) * 128 + j % 4];
+                }
+            }
+            sum += (float) dot * db * (float) da;
+        }
+        s[row] = sum + (sz ? sz[row] : 0.0f);
+    }
+}
+
+static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, float * restrict s1, const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows, const float * restrict sz0, const float * restrict sz1) {
+    tiled_vec_dot_iq3_xxs_32x1(n, s0, vx, vy0, valid_rows, sz0);
+    tiled_vec_dot_iq3_xxs_32x1(n, s1, vx, vy1, valid_rows, sz1);
+}
+
 static void tiled_vec_dot_q4_0_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
     const uint8_t * restrict tile_ptr = vx;
     const uint8_t * restrict y_q = vy;
