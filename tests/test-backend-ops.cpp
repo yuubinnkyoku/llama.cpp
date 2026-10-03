@@ -20,6 +20,10 @@
 #include "ggml-backend.h"
 #include "ggml-cpp.h"
 
+#ifdef GGML_USE_HEXAGON
+#include "ggml-quants.h"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -5090,6 +5094,52 @@ struct test_mul_mat : public test_case {
         return ggml_op_name(GGML_OP_MUL_MAT);
     }
 };
+
+#ifdef GGML_USE_HEXAGON
+struct test_mul_mat_iq3_xxs_edge : public test_mul_mat {
+    const int edge;
+
+    test_mul_mat_iq3_xxs_edge(int64_t m, int64_t n, int edge)
+        : test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, m, n, 1024, {2, 3}, {1, 1}), edge(edge) {}
+
+    std::string vars() override {
+        return test_mul_mat::vars() + "," + VAR_TO_STR(edge);
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_case::initialize_tensors(ctx);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type != GGML_TYPE_IQ3_XXS || t->view_src) {
+                continue;
+            }
+            std::vector<block_iq3_xxs> blocks(ggml_nbytes(t) / sizeof(block_iq3_xxs));
+            ggml_backend_tensor_get(t, blocks.data(), 0, ggml_nbytes(t));
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                block_iq3_xxs & b = blocks[i];
+                b.d = ggml_fp32_to_fp16(i % 3 == 0 ? 0.01f : i % 3 == 1 ? 0.5f : -0.75f);
+                if (edge < 2) {
+                    memset(b.qs, edge == 0 ? 0 : 255, 64);
+                }
+                for (int group = 0; group < 8; ++group) {
+                    uint8_t * p = b.qs + 64 + 4 * group;
+                    // GGUF aux words use little-endian byte order.
+                    uint32_t aux = (uint32_t) p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+                    if (edge == 2 || edge == 3) {
+                        aux = (aux & 0xf0000000u) | (edge == 2 ? 0 : 0x0fffffffu);
+                    } else if (edge == 4 || edge == 5) {
+                        aux = (aux & 0x0fffffffu) | (edge == 4 ? 0 : 0xf0000000u);
+                    }
+                    for (int byte = 0; byte < 4; ++byte) {
+                        p[byte] = (uint8_t) (aux >> (8 * byte));
+                    }
+                }
+            }
+            ggml_backend_tensor_set(t, blocks.data(), 0, ggml_nbytes(t));
+        }
+    }
+};
+
+#endif
 
 // GGML_HINT_SRC0_IS_HADAMARD
 struct test_mul_mat_hadamard : public test_mul_mat {
@@ -10292,6 +10342,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33,  1, 1024, {2, 3}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 64, 32, 4096, {2, 1}, {1, 1}));
+    for (int64_t m : {31, 32, 33, 63, 64, 65}) {
+        for (int64_t n : {1, 10}) {
+            for (int edge = 0; edge < 6; ++edge) {
+                test_cases.emplace_back(new test_mul_mat_iq3_xxs_edge(m, n, edge));
+            }
+        }
+    }
 #else
     // m = a rows
     // n = b rows

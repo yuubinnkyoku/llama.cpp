@@ -279,6 +279,9 @@ endif()
 
 # TODO: make this test (and others) not link `libllama` as it is not needed [TAG_TESTS_LLAMA_LINK]
 llama_build(test-backend-ops.cpp)
+if (GGML_HEXAGON)
+    target_include_directories(test-backend-ops PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+endif()
 
 llama_build_and_test(test-tiled-mulmat.cpp)
 
