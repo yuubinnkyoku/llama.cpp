@@ -353,6 +353,9 @@ static int vtcm_alloc(struct htp_context * ctx) {
     ctx->iq2s_grid_ready   = false;
     ctx->iq2s_grid         = NULL;
     ctx->iq2s_scratch_base = NULL;
+    ctx->iq2xs_grid        = NULL;
+    ctx->iq2xxs_grid       = NULL;
+    ctx->iq2f_signs        = NULL;
 
     return 0;
 }

@@ -811,6 +811,217 @@ static void tiled_vec_dot_iq2_s_32x2(const uint32_t n, float * restrict s0, floa
     }
 }
 
+// IQ2_XS / IQ2_XXS share the IQ2_S tile shape (see iq2-family-repack.h): the
+// sign plane carries the sign index directly instead of a qh field, so one
+// unpack serves both types.  Only the grid table and its VTCM size differ and
+// are passed in.
+#define IQ2F_XS_GRID_BYTES  4096
+#define IQ2F_XXS_GRID_BYTES 2048
+#define IQ2F_SIGNS_BYTES    1024
+
+static inline uint32_t iq2f_apply_neg4(uint32_t magnitude, uint32_t neg) {
+    return (magnitude ^ neg) + (neg & 0x01010101u);
+}
+
+// VTCM gather path: two grid words and two sign words per group, landing in
+// the same per-thread scratch slot the IQ2_S gather uses.
+static inline HVX_VectorPair iq2f_unpack_group_8k_gather(
+    const uint8_t * restrict tile, int l,
+    const uint64_t * grid, uint32_t grid_bytes,
+    const uint64_t * signs,
+    HVX_Vector * restrict scratch) {
+
+    const uint32_t grid_rt  = (uint32_t) (uintptr_t) grid;
+    const uint32_t signs_rt = (uint32_t) (uintptr_t) signs;
+    const uint32_t grid_mu  = grid_bytes - 1;
+    const uint32_t signs_mu = IQ2F_SIGNS_BYTES - 1;
+
+    const HVX_Vector v_idx  = hvx_vmemu(tile + 0   + l * 32);
+    const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
+
+    // grid byte offset = 8 * (idx | ((sign & 1) << 8))
+    HVX_Vector v_off = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_idx))));
+    const HVX_Vector v_hi = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+        Q6_V_vand_VV(v_sign, Q6_Vb_vsplat_R(1))))));
+    v_off = Q6_Vw_vadd_VwVw(v_off, Q6_Vw_vasl_VwR(v_hi, 8));
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);
+    v_off = Q6_Vw_vadd_VwVw(v_off, v_off);
+
+    // sign byte offset = 8 * (sign >> 1)
+    const HVX_Vector v_sidx = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+        Q6_Vub_vlsr_VubR(v_sign, 1)))));
+    const HVX_Vector v_off_s = Q6_Vw_vasl_VwR(v_sidx, 3);
+
+    Q6_vgather_ARMVw(&scratch[0], grid_rt,  grid_mu,  v_off);
+    Q6_vgather_ARMVw(&scratch[1], grid_rt,  grid_mu,  Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4)));
+    Q6_vgather_ARMVw(&scratch[2], signs_rt, signs_mu, v_off_s);
+    Q6_vgather_ARMVw(&scratch[3], signs_rt, signs_mu, Q6_Vw_vadd_VwVw(v_off_s, Q6_V_vsplat_R(4)));
+
+    const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
+    const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(
+        Q6_V_vxor_VV(scratch[0], scratch[2]), Q6_V_vand_VV(scratch[2], v_ones));
+    const HVX_Vector v_w1 = Q6_Vw_vadd_VwVw(
+        Q6_V_vxor_VV(scratch[1], scratch[3]), Q6_V_vand_VV(scratch[3], v_ones));
+
+    return Q6_W_vcombine_VV(v_w1, v_w0);
+}
+
+// grid/signs point at .rodata when the gather flag is off and at VTCM when it
+// is on; a NULL scratch keeps the scalar lookup path.
+static inline HVX_VectorPair iq2f_unpack_group_8k(
+    const uint8_t * restrict tile, int l,
+    const uint64_t * grid, uint32_t grid_bytes,
+    const uint64_t * signs,
+    HVX_Vector * restrict scratch) {
+
+    if (scratch) {
+        return iq2f_unpack_group_8k_gather(tile, l, grid, grid_bytes, signs, scratch);
+    }
+
+    uint32_t w0[32] __attribute__((aligned(128)));
+    uint32_t w1[32] __attribute__((aligned(128)));
+
+    const uint8_t * restrict idx_l  = tile + 0   + l * 32;
+    const uint8_t * restrict sign_l = tile + 128 + l * 32;
+
+    #pragma unroll(4)
+    for (int row = 0; row < 32; ++row) {
+        const uint32_t payload = sign_l[row];
+        const uint32_t grid_index = (uint32_t) idx_l[row] | ((payload & 1u) << 8);
+        const uint64_t g = grid[grid_index];
+        const uint64_t s = signs[payload >> 1];
+
+        w0[row] = iq2f_apply_neg4((uint32_t) g,         (uint32_t) s);
+        w1[row] = iq2f_apply_neg4((uint32_t) (g >> 32), (uint32_t) (s >> 32));
+    }
+
+    return Q6_W_vcombine_VV(*(const HVX_Vector *) w1, *(const HVX_Vector *) w0);
+}
+
+static inline HVX_VectorPair accum_iq2f_32x1(
+    const uint8_t * restrict tile,
+    const HVX_Vector * restrict v_act,
+    const uint64_t * grid, uint32_t grid_bytes,
+    const uint64_t * signs,
+    HVX_Vector * restrict scratch
+) {
+    HVX_Vector lo = Q6_V_vzero();
+    HVX_Vector hi = Q6_V_vzero();
+
+    #pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const HVX_VectorPair v_w = iq2f_unpack_group_8k(tile, l, grid, grid_bytes, signs, scratch);
+        if (l < 2) {
+            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
+        } else {
+            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
+        }
+    }
+
+    return Q6_W_vcombine_VV(hi, lo);
+}
+
+static inline void accum_iq2f_32x2(
+    const uint8_t * restrict tile,
+    const HVX_Vector * restrict v_act0,
+    const HVX_Vector * restrict v_act1,
+    HVX_VectorPair * restrict sums0,
+    HVX_VectorPair * restrict sums1,
+    const uint64_t * grid, uint32_t grid_bytes,
+    const uint64_t * signs,
+    HVX_Vector * restrict scratch
+) {
+    HVX_Vector lo0 = Q6_V_vzero();
+    HVX_Vector hi0 = Q6_V_vzero();
+    HVX_Vector lo1 = Q6_V_vzero();
+    HVX_Vector hi1 = Q6_V_vzero();
+
+    #pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const HVX_VectorPair v_w = iq2f_unpack_group_8k(tile, l, grid, grid_bytes, signs, scratch);
+        const HVX_Vector w0 = Q6_V_lo_W(v_w);
+        const HVX_Vector w1 = Q6_V_hi_W(v_w);
+
+        if (l < 2) {
+            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w0, v_act0[2 * l + 0]);
+            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w1, v_act0[2 * l + 1]);
+            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w0, v_act1[2 * l + 0]);
+            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w1, v_act1[2 * l + 1]);
+        } else {
+            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w0, v_act0[2 * l + 0]);
+            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w1, v_act0[2 * l + 1]);
+            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w0, v_act1[2 * l + 0]);
+            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w1, v_act1[2 * l + 1]);
+        }
+    }
+
+    *sums0 = Q6_W_vcombine_VV(hi0, lo0);
+    *sums1 = Q6_W_vcombine_VV(hi1, lo1);
+}
+
+static void tiled_vec_dot_iq2f_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz, const uint64_t * grid, uint32_t grid_bytes, const uint64_t * signs, HVX_Vector * restrict scratch) {
+    const uint8_t * restrict tile_ptr = vx;
+    const uint8_t * restrict y_q = vy;
+
+    HVX_Vector v_sum_float = Q6_V_vzero();
+
+    const uint32_t n_k_tiles = n / 32;
+    for (uint32_t kt = 0; kt < n_k_tiles; ++kt) {
+        const uint8_t * restrict tile = tile_ptr + kt * 384;
+        const HVX_Vector * restrict v_act = (const HVX_Vector *) (y_q + kt * 1152);
+
+        const HVX_VectorPair sums = accum_iq2f_32x1(tile, v_act, grid, grid_bytes, signs, scratch);
+        const HVX_Vector v_scale_w = iq2_s_scale_vector(tile);
+        v_sum_float = hvx_vec_add_f32_f32(
+            v_sum_float,
+            scale_q6_k_32x1(sums, v_scale_w, v_act[8]));
+    }
+
+    if (sz) {
+        hvx_vec_store_u(s, valid_rows * sizeof(float), hvx_vec_add_f32_f32(v_sum_float, hvx_vmemu(sz)));
+    } else {
+        hvx_vec_store_u(s, valid_rows * sizeof(float), v_sum_float);
+    }
+}
+
+static void tiled_vec_dot_iq2f_32x2(const uint32_t n, float * restrict s0, float * restrict s1, const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows, const float * restrict sz0, const float * restrict sz1, const uint64_t * grid, uint32_t grid_bytes, const uint64_t * signs, HVX_Vector * restrict scratch) {
+    const uint8_t * restrict tile_ptr = vx;
+    const uint8_t * restrict y0_q = vy0;
+    const uint8_t * restrict y1_q = vy1;
+
+    HVX_Vector sum0 = Q6_V_vzero();
+    HVX_Vector sum1 = Q6_V_vzero();
+
+    const uint32_t n_k_tiles = n / 32;
+    for (uint32_t kt = 0; kt < n_k_tiles; ++kt) {
+        const uint8_t * restrict tile = tile_ptr + kt * 384;
+        const HVX_Vector * restrict v_act0 = (const HVX_Vector *) (y0_q + kt * 1152);
+        const HVX_Vector * restrict v_act1 = (const HVX_Vector *) (y1_q + kt * 1152);
+
+        HVX_VectorPair sums0;
+        HVX_VectorPair sums1;
+        accum_iq2f_32x2(tile, v_act0, v_act1, &sums0, &sums1, grid, grid_bytes, signs, scratch);
+
+        const HVX_Vector v_scale_w = iq2_s_scale_vector(tile);
+        sum0 = hvx_vec_add_f32_f32(sum0, scale_q6_k_32x1(sums0, v_scale_w, v_act0[8]));
+        sum1 = hvx_vec_add_f32_f32(sum1, scale_q6_k_32x1(sums1, v_scale_w, v_act1[8]));
+    }
+
+    if (sz0) {
+        hvx_vec_store_u(s0, valid_rows * sizeof(float), hvx_vec_add_f32_f32(sum0, hvx_vmemu(sz0)));
+    } else {
+        hvx_vec_store_u(s0, valid_rows * sizeof(float), sum0);
+    }
+    if (sz1) {
+        hvx_vec_store_u(s1, valid_rows * sizeof(float), hvx_vec_add_f32_f32(sum1, hvx_vmemu(sz1)));
+    } else {
+        hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
+    }
+}
+
 static void tiled_vec_dot_q4_0_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
     const uint8_t * restrict tile_ptr = vx;
     const uint8_t * restrict y_q = vy;

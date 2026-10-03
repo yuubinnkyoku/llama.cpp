@@ -112,6 +112,11 @@ struct htp_context {
     const uint64_t *       iq2s_grid;
     uint8_t *              iq2s_scratch_base;
 
+    // IQ2_XS / IQ2_XXS codebooks, placed after the IQ2_S scratch
+    const uint64_t *       iq2xs_grid;
+    const uint64_t *       iq2xxs_grid;
+    const uint64_t *       iq2f_signs;
+
     uint64_t               max_vmem;
     struct htp_dirty_range dirty_ranges[HTP_MAX_DIRTY_RANGES];
 
