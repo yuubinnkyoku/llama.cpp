@@ -514,6 +514,21 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
 #define IQ3S_DOT_2X2(n, s0, s1, w, a0, a1, rows, z0, z1) \
     tiled_vec_dot_iq3_s_gather_32x2(n, s0, s1, w, a0, a1, rows, z0, z1, octx->ctx->iq3s_grid, htp_iq3s_scratch_of(octx, ith))
 
+#define Q2K_DOT_2X1(n, s, w, a, rows, z) do { \
+    if (octx->flags & HTP_OPFLAGS_Q2K_HVX) { \
+        tiled_vec_dot_q2_K_hvx_32x1(n, s, w, a, rows, z); \
+    } else { \
+        tiled_vec_dot_q2_K_32x1(n, s, w, a, rows, z); \
+    } \
+} while (0)
+#define Q2K_DOT_2X2(n, s0, s1, w, a0, a1, rows, z0, z1) do { \
+    if (octx->flags & HTP_OPFLAGS_Q2K_HVX) { \
+        tiled_vec_dot_q2_K_hvx_32x2(n, s0, s1, w, a0, a1, rows, z0, z1); \
+    } else { \
+        tiled_vec_dot_q2_K_32x2(n, s0, s1, w, a0, a1, rows, z0, z1); \
+    } \
+} while (0)
+
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
 static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void * data) {                                                 \
     htp_matmul_preamble;                                                                                                                   \
@@ -819,7 +834,7 @@ MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K,  tiled_vec_dot_q2_K_32x2, tiled_vec_dot_q2_K_32x1)
+MATMUL_2D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K, Q2K_DOT_2X2, Q2K_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -996,7 +1011,7 @@ MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X1)
-MATVEC_2D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K,  tiled_vec_dot_q2_K_32x1)
+MATVEC_2D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K, Q2K_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x1)
 MATVEC_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x1)
@@ -1143,7 +1158,7 @@ MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
-MATMUL_4D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K,  tiled_vec_dot_q2_K_32x2, tiled_vec_dot_q2_K_32x1)
+MATMUL_4D_REPACKED_IMPL(q2_K, HTP_MM_WEIGHT_TILE_SIZE_Q2_K, Q2K_DOT_2X2, Q2K_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)

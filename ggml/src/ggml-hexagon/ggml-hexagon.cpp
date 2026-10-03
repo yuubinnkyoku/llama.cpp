@@ -111,6 +111,7 @@ static int    opt_ar_select = 2; // 2 = fused ALLREDUCE+ADD (DMA, default), 1 = 
 static int    opt_iq2s_gather = 0; // IQ2_S matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
 static int    opt_iq3xxs_gather = 0;
 static int    opt_iq3s_gather = 0;
+static int    opt_q2k_hvx = 0;
 
 // Default PMU events, if profiling with PMU (mode=2) is enabled
 // See https://docs.qualcomm.com/doc/80-N2040-60/topic/pmu-events.html
@@ -3099,6 +3100,10 @@ struct ggml_hexagon_opbatch {
                     break;
                 }
             }
+        }
+
+        if (opt_q2k_hvx && node.opcode == HTP_OP_MUL_MAT && node.node->src[0]->type == GGML_TYPE_Q2_K) {
+            o.flags |= HTP_OPFLAGS_Q2K_HVX;
         }
 
         ggml_hexagon_dump_op_exec(sess->c_name(), ops[n], o.flags);
@@ -8719,6 +8724,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     const char * str_iq2s_gather = getenv("GGML_HEXAGON_IQ2S_GATHER");
     const char * str_iq3xxs_gather = getenv("GGML_HEXAGON_IQ3XXS_GATHER");
     const char * str_iq3s_gather = getenv("GGML_HEXAGON_IQ3S_GATHER");
+    const char * str_q2k_hvx = getenv("GGML_HEXAGON_Q2K_HVX");
 
     // Init Arch first since it affects other defaults
     if (!str_arch) {
@@ -8771,6 +8777,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     opt_iq2s_gather = str_iq2s_gather ? atoi(str_iq2s_gather) != 0         : opt_iq2s_gather;
     opt_iq3xxs_gather = str_iq3xxs_gather ? atoi(str_iq3xxs_gather) != 0 : opt_iq3xxs_gather;
     opt_iq3s_gather = str_iq3s_gather ? atoi(str_iq3s_gather) != 0 : opt_iq3s_gather;
+    opt_q2k_hvx = str_q2k_hvx ? atoi(str_q2k_hvx) != 0 : opt_q2k_hvx;
 
     // Parse device configuration
     const char * str_devices  = getenv("GGML_HEXAGON_DEVICES");

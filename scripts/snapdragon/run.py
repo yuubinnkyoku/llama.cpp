@@ -36,6 +36,7 @@ MANAGED_ENV_NAMES = (
     "GGML_HEXAGON_IQ2S_GATHER",
     "GGML_HEXAGON_IQ3XXS_GATHER",
     "GGML_HEXAGON_IQ3S_GATHER",
+    "GGML_HEXAGON_Q2K_HVX",
     "GGML_HEXAGON_ETM",
     "GGML_HEXAGON_ARCH",
     "GGML_HEXAGON_OPTRACE",
@@ -177,6 +178,7 @@ def main():
     parser.add_argument("--hex-optrace", help="Trace buffer size in number of records (GGML_HEXAGON_OPTRACE)")
     parser.add_argument("--hex-iq2s-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ2_S VTCM vgather codebook lookup (GGML_HEXAGON_IQ2S_GATHER)")
     parser.add_argument("--hex-iq3xxs-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ3_XXS VTCM vgather dot (GGML_HEXAGON_IQ3XXS_GATHER, default 0)")
+    parser.add_argument("--hex-q2k-hvx", nargs="?", const="1", help="Enable (1) or disable (0) Q2_K HVX dot (GGML_HEXAGON_Q2K_HVX, default 0)")
     parser.add_argument("--hex-iq3s-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ3_S VTCM vgather dot (GGML_HEXAGON_IQ3S_GATHER, default 0)")
 
     # OpenCL specific parameters
@@ -322,6 +324,7 @@ def main():
     set_env("GGML_HEXAGON_IQ2S_GATHER", args.hex_iq2s_gather)
     set_env("GGML_HEXAGON_IQ3XXS_GATHER", args.hex_iq3xxs_gather)
     set_env("GGML_HEXAGON_IQ3S_GATHER", args.hex_iq3s_gather)
+    set_env("GGML_HEXAGON_Q2K_HVX", args.hex_q2k_hvx)
     set_env("MTMD_BACKEND_DEVICE", args.mtmd_device)
 
     # OpenCL environment variables
