@@ -29,7 +29,7 @@ jobs:
           -DGGML_NATIVE=OFF
 
       - name: Build low-bit host tests
-        run: cmake --build build --target test-hexagon-iq2-s-repack test-hexagon-iq3-s-repack test-hexagon-q2-k-repack test-backend-ops -j2
+        run: cmake --build build --target test-hexagon-iq2-s-repack test-hexagon-iq3-s-repack test-hexagon-q2-k-repack -j2
 
       - name: Run low-bit host regression
         run: ctest --test-dir build -R '^test-hexagon-(iq2-s|iq3-s|q2-k)-repack$' --output-on-failure
