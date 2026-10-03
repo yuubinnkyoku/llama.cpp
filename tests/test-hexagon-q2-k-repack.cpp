@@ -5,17 +5,25 @@
 #include "ggml-hexagon/htp/q2-k-scalar.h"
 
 #include <cmath>
+#include <cfloat>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 static_assert(sizeof(block_q2_K) == 84, "Q2_K raw block size");
+static_assert(HTP_MM_WEIGHT_TILE_SIZE_Q2_K == 448 && HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q2_K == 512, "Q2_K storage/staging sizes");
+static_assert(Q2K_QUANT_PLANE_OFFSET == 0 && Q2K_SCALE0_PLANE_OFFSET == 256 && Q2K_SCALE1_PLANE_OFFSET == 288 && Q2K_D_PLANE_OFFSET == 320 && Q2K_DMIN_PLANE_OFFSET == 384, "Q2_K frozen offsets");
+static_assert(Q2K_D_PLANE_OFFSET + 128 == HTP_MM_WEIGHT_TILE_SIZE_Q2_K, "Q2_K D/DMIN vector load boundary");
 
 using namespace ggml_hexagon_q2k;
 
 static int n_failed = 0;
 static int semantic_cases = 0;
 static int scalar_cases = 0;
+static int unpack_cases = 0;
+static int integer_cases = 0;
+static int algebra_cases = 0;
+static double algebra_nmse_max = 0.0;
 
 static void check(bool cond, const char * msg) {
     if (!cond) {
@@ -43,6 +51,163 @@ static void check_semantics(const block_q2_K & b) {
     ++semantic_cases;
 }
 
+static uint32_t unpack_word(uint32_t packed) {
+    return (packed & 3) | (((packed >> 2) & 3) << 8) | (((packed >> 4) & 3) << 16) | ((packed >> 6) << 24);
+}
+
+static void model_unpack_plane(const uint8_t * tile, int plane, uint32_t * words) {
+    uint8_t load[128];
+    std::memcpy(load, tile + Q2K_QUANT_PLANE_OFFSET + 32 * plane, sizeof(load));
+    for (int row = 0; row < 32; ++row) {
+        words[row] = unpack_word(load[row]);
+    }
+}
+
+static void model_dot(int64_t k, float * out, const uint8_t * weights, const uint8_t * activation, int64_t rows, const float * bias) {
+    float sums[32] = {};
+    for (int64_t kt = 0; kt < k / 32; ++kt) {
+        const uint8_t * tile = weights + kt * ALIGNED_TILE_SIZE;
+        const int8_t * act = (const int8_t *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const float da = q2_k_load_f16((const uint8_t *) act + HTP_MM_ACT_SCALE_PLANE_OFFSET_Q8_0);
+        float tile_sum[32] = {};
+        for (int subgroup = 0; subgroup < 2; ++subgroup) {
+            int dot[32] = {}, suma[32] = {};
+            for (int p = 4 * subgroup; p < 4 * subgroup + 4; ++p) {
+                uint32_t words[32];
+                model_unpack_plane(tile, p, words);
+                for (int row = 0; row < 32; ++row) {
+                    for (int j = 0; j < 4; ++j) {
+                        const int a = act[p * 128 + 4 * row + j];
+                        dot[row] += (int) ((words[row] >> (8 * j)) & 255) * a;
+                        suma[row] += a;
+                    }
+                }
+            }
+            for (int row = 0; row < 32; ++row) {
+                const uint8_t sc = tile[(subgroup ? Q2K_SCALE1_PLANE_OFFSET : Q2K_SCALE0_PLANE_OFFSET) + row];
+                const float base_d = q2_k_load_f16(tile + Q2K_D_PLANE_OFFSET + 2 * row) * da;
+                const float base_m = q2_k_load_f16(tile + Q2K_DMIN_PLANE_OFFSET + 2 * row) * da;
+                tile_sum[row] += ((float) dot[row] * base_d) * (sc & 15) - ((float) suma[row] * base_m) * (sc >> 4);
+            }
+        }
+        for (int row = 0; row < 32; ++row) {
+            sums[row] += tile_sum[row];
+        }
+    }
+    for (int64_t row = 0; row < rows; ++row) {
+        out[row] = sums[row] + (bias ? bias[row] : 0.0f);
+    }
+}
+
+static void check_algebra_float(const float * ref, const float * got, int64_t rows) {
+    double error = 0.0, energy = 0.0;
+    for (int64_t row = 0; row < rows; ++row) {
+        const double diff = (double) ref[row] - got[row];
+        error += diff * diff;
+        energy += (double) ref[row] * ref[row];
+    }
+    const double nmse = energy ? error / energy : error;
+    if (nmse > algebra_nmse_max) {
+        algebra_nmse_max = nmse;
+    }
+    check(std::isfinite(nmse) && nmse <= 1e-7, "subgroup model meets backend NMSE contract");
+    ++algebra_cases;
+}
+
+static void test_algebra() {
+    uint32_t rng = 0x198c273a;
+    std::vector<uint8_t> tile(ALIGNED_TILE_SIZE);
+    for (int packed = 0; packed < 256; ++packed) {
+        for (uint8_t & byte : tile) {
+            byte = (uint8_t) random32(rng);
+        }
+        for (int p = 0; p < 8; ++p) {
+            std::memset(tile.data() + QUANT_PLANE_OFFSET + 32 * p, packed, 32);
+        }
+        for (int p = 0; p < 8; ++p) {
+            uint32_t words[32];
+            model_unpack_plane(tile.data(), p, words);
+            for (int row = 0; row < 32; ++row) {
+                for (int j = 0; j < 4; ++j) {
+                    check(((words[row] >> (8 * j)) & 255) == ((packed >> (2 * j)) & 3), "2-bit word unpack exact");
+                }
+                ++unpack_cases;
+            }
+        }
+    }
+    for (int sc = 0; sc < 256; ++sc) {
+        for (int subgroup = 0; subgroup < 2; ++subgroup) {
+            const size_t offset = subgroup ? SCALE1_PLANE_OFFSET : SCALE0_PLANE_OFFSET;
+            std::memset(tile.data() + offset, sc, 32);
+            uint8_t load[128];
+            std::memcpy(load, tile.data() + offset, sizeof(load));
+            for (int row = 0; row < 32; ++row) {
+                const uint32_t widened = load[row];
+                check((widened & 15) == (unsigned) sc % 16 && (widened >> 4) == (unsigned) sc / 16, "scale/min widened lanes exact");
+            }
+        }
+    }
+    const int8_t boundaries[] = {-128, -127, -1, 0, 1, 126, 127};
+    const uint8_t nibbles[] = {0, 1, 15};
+    for (int c = 0; c < 5000; ++c) {
+        int8_t a[32];
+        uint8_t q[32][32];
+        for (int k = 0; k < 32; ++k) {
+            a[k] = c < 63 ? boundaries[c % 7] : c < 126 ? boundaries[k % 7] : (int8_t) ((int) (random32(rng) % 256) - 128);
+        }
+        for (int row = 0; row < 32; ++row) {
+            for (int p = 0; p < 8; ++p) {
+                uint8_t packed = 0;
+                for (int j = 0; j < 4; ++j) {
+                    q[row][4 * p + j] = c < 63 ? (uint8_t) ((c / 7) % 4) : c < 126 ? (uint8_t) (j % 2 ? 2 : 1) : (uint8_t) (random32(rng) & 3);
+                    packed |= q[row][4 * p + j] << (2 * j);
+                }
+                tile[QUANT_PLANE_OFFSET + 32 * p + row] = packed;
+            }
+        }
+        for (int subgroup = 0; subgroup < 2; ++subgroup) {
+            int dot[32] = {}, suma[32] = {};
+            for (int p = 4 * subgroup; p < 4 * subgroup + 4; ++p) {
+                uint32_t words[32];
+                model_unpack_plane(tile.data(), p, words);
+                for (int row = 0; row < 32; ++row) {
+                    for (int j = 0; j < 4; ++j) {
+                        dot[row] += (int) ((words[row] >> (8 * j)) & 255) * a[4 * p + j];
+                        suma[row] += a[4 * p + j];
+                    }
+                }
+            }
+            for (int row = 0; row < 32; ++row) {
+                int ref_dot = 0, ref_suma = 0;
+                float ref = 0.0f, sum_abs = 0.0f;
+                const int scale = c < 126 ? nibbles[(c / 7) % 3] : random32(rng) & 15;
+                const int min = c < 126 ? nibbles[(c / 21) % 3] : random32(rng) & 15;
+                const uint8_t sc = (uint8_t) (scale | (min << 4));
+                check((sc & 15) == scale && (sc >> 4) == min, "scale/min nibble exact");
+                const float d = ggml_fp16_to_fp32(ggml_fp32_to_fp16(((int) (random32(rng) % 257) - 128) / 8192.0f));
+                const float dm = ggml_fp16_to_fp32(ggml_fp32_to_fp16(((int) (random32(rng) % 257) - 128) / 4096.0f));
+                const float da = ggml_fp16_to_fp32(ggml_fp32_to_fp16((random32(rng) % 32) / 1024.0f));
+                for (int k = 16 * subgroup; k < 16 * subgroup + 16; ++k) {
+                    ref_dot += q[row][k] * a[k];
+                    ref_suma += a[k];
+                    const float term = (d * scale * q[row][k] - dm * min) * a[k] * da;
+                    ref += term;
+                    sum_abs += std::fabs(term);
+                }
+                check(dot[row] == ref_dot, "integer sum_qa exact");
+                check(suma[row] == ref_suma, "integer sum_a exact");
+                // 16 terms: abs(sum_qa) <= 6144, abs(sum_a) <= 2048.
+                check(std::abs(dot[row]) <= 6144 && std::abs(suma[row]) <= 2048, "integer bounds");
+                const float got = ((float) dot[row] * (d * da)) * scale - ((float) suma[row] * (dm * da)) * min;
+                const float magnitude = std::fabs(d * da * scale * dot[row]) + std::fabs(dm * da * min * suma[row]);
+                check(std::fabs(got - ref) <= 32 * FLT_EPSILON * (sum_abs + magnitude), "subgroup formula vs per-element rounding bound");
+                ++integer_cases;
+            }
+        }
+    }
+    std::printf("Q2_K unpack lanes: %d; sum_qa/sum_a subgroup lanes: %d\n", unpack_cases, integer_cases);
+}
+
 static void check_scalar(const block_q2_K * raw, const uint8_t * packed, int64_t k, int64_t rows, uint32_t & rng) {
     const size_t ntiles = (size_t) k / 32;
     std::vector<uint8_t> staged(ntiles * ALIGNED_TILE_SIZE, 0xa5);
@@ -56,11 +221,15 @@ static void check_scalar(const block_q2_K * raw, const uint8_t * packed, int64_t
             uint8_t * act = (a ? act1 : act0).data() + kt * HTP_MM_ACT_TILE_SIZE_Q8_0;
             const ggml_half da = ggml_fp32_to_fp16((random32(rng) % 32) / 1024.0f);
             (a ? da1 : da0)[kt] = ggml_fp16_to_fp32(da);
-            std::memcpy(act + HTP_MM_ACT_SCALE_PLANE_OFFSET_Q8_0, &da, sizeof(da));
+            for (int lane = 0; lane < 64; ++lane) {
+                std::memcpy(act + HTP_MM_ACT_SCALE_PLANE_OFFSET_Q8_0 + 2 * lane, &da, sizeof(da));
+            }
             for (int j = 0; j < 32; ++j) {
                 const int8_t aq = (int8_t) ((int) (random32(rng) % 255) - 127);
                 (a ? aq1 : aq0)[kt * 32 + j] = aq;
-                act[(j / 4) * 128 + (j & 3)] = (uint8_t) aq;
+                for (int lane = 0; lane < 32; ++lane) {
+                    act[(j / 4) * 128 + 4 * lane + (j & 3)] = (uint8_t) aq;
+                }
             }
         }
     }
@@ -73,6 +242,21 @@ static void check_scalar(const block_q2_K * raw, const uint8_t * packed, int64_t
     tiled_vec_dot_q2_K_32x2((uint32_t) k, got0, got1, staged.data(), act0.data(), act1.data(), (uint32_t) rows, sz, sz);
     tiled_vec_dot_q2_K_32x1((uint32_t) k, single, staged.data(), act0.data(), (uint32_t) rows, sz);
     check(std::memcmp(single, got0, sizeof(got0)) == 0, "32x1 and 32x2 agree, including output guards");
+    float model0[32], model1[32], padding[32];
+    for (int row = 0; row < 32; ++row) {
+        model0[row] = model1[row] = padding[row] = 12345.0f;
+    }
+    model_dot(k, model0, staged.data(), act0.data(), rows, sz);
+    model_dot(k, model1, staged.data(), act1.data(), rows, sz);
+    check_algebra_float(got0, model0, rows);
+    check_algebra_float(got1, model1, rows);
+    for (size_t kt = 0; kt < ntiles; ++kt) {
+        for (size_t j = TILE_SIZE; j < ALIGNED_TILE_SIZE; ++j) {
+            staged[kt * ALIGNED_TILE_SIZE + j] = (uint8_t) random32(rng);
+        }
+    }
+    model_dot(k, padding, staged.data(), act0.data(), rows, sz);
+    check(std::memcmp(model0, padding, sizeof(model0)) == 0, "vector-load model is staging-padding independent");
     for (int64_t r = 0; r < rows; ++r) {
         dequantize_row_q2_K(raw + r * (k / QK_K), ref.data(), k);
         float sum0 = 0.0f, sum1 = 0.0f;
@@ -88,6 +272,7 @@ static void check_scalar(const block_q2_K * raw, const uint8_t * packed, int64_t
     }
     for (int64_t r = rows; r < 32; ++r) {
         check(got0[r] == 12345.0f && got1[r] == 12345.0f, "scalar writes only valid rows");
+        check(model0[r] == 12345.0f && model1[r] == 12345.0f, "algebra model writes only valid rows");
     }
 }
 
@@ -238,10 +423,12 @@ static void test_slices() {
 
 int main() {
     test_sizes();
+    test_algebra();
     test_semantics();
     test_repack();
     test_slices();
     std::printf("Q2_K scalar host cases: %d\n", scalar_cases);
+    std::printf("Q2_K subgroup float batches: %d; max NMSE: %.9g (limit 1e-7)\n", algebra_cases, algebra_nmse_max);
     std::printf("%s: Q2_K repack tests (%d failures)\n", n_failed ? "FAIL" : "PASS", n_failed);
     return n_failed != 0;
 }
