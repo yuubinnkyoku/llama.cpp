@@ -325,25 +325,43 @@ void htp_iq2s_grid_refresh(struct htp_context * ctx) {
     }
 }
 
-// Use free space in the existing reserve, after every IQ2_S scratch slot.
-#define IQ3XXS_GRID_OFFSET ((IQ2S_SCRATCH_OFFSET + IQ2S_SCRATCH_STRIDE * HTP_MAX_NTHREADS + 127) & ~(size_t) 127)
-#define IQ3XXS_SIGN_OFFSET (IQ3XXS_GRID_OFFSET + 1024)
-#define IQ3XXS_SCRATCH_OFFSET (IQ3XXS_SIGN_OFFSET + 128)
+// IQ3_XXS shares the IQ2 family reserve and sits after the IQ2F tables.  The
+// old branch based this on the IQ2_S scratch alone, which now collides with
+// the IQ2_XS / IQ2_XXS grids and the IQ2 family sign table.
+#define IQ2F_TABLES_END (IQ2F_TABLES_OFFSET + IQ2F_XS_GRID_BYTES + IQ2F_XXS_GRID_BYTES + IQ2F_SIGNS_BYTES)
+#define IQ3XXS_GRID_BYTES    1024
+#define IQ3XXS_SIGNS_BYTES   128
+#define IQ3XXS_GRID_OFFSET   (((IQ2F_TABLES_END) + 127) & ~(size_t) 127)
+#define IQ3XXS_SIGN_OFFSET   (IQ3XXS_GRID_OFFSET + IQ3XXS_GRID_BYTES)
+#define IQ3XXS_SCRATCH_OFFSET (IQ3XXS_SIGN_OFFSET + IQ3XXS_SIGNS_BYTES)
 #define IQ3XXS_SCRATCH_STRIDE 384
 
-_Static_assert(sizeof(iq3xxs_grid) == 1024 && sizeof(ksigns_iq2xs) == 128, "IQ3_XXS codebook size mismatch");
-_Static_assert(IQ3XXS_GRID_OFFSET % 128 == 0 && IQ3XXS_SIGN_OFFSET % 128 == 0 && IQ3XXS_SCRATCH_OFFSET % 128 == 0, "IQ3_XXS VTCM alignment");
-_Static_assert(IQ3XXS_SCRATCH_OFFSET + HTP_MAX_NTHREADS * IQ3XXS_SCRATCH_STRIDE <= HTP_IQ2S_GRID_VTCM_RESERVE, "IQ codebooks and scratch exceed VTCM reserve");
+_Static_assert(sizeof(iq3xxs_grid) == IQ3XXS_GRID_BYTES && sizeof(ksigns_iq2xs) == IQ3XXS_SIGNS_BYTES,
+    "IQ3_XXS codebook size mismatch");
+_Static_assert(IQ2F_TABLES_OFFSET % 128 == 0 && IQ2F_TABLES_END <= IQ3XXS_GRID_OFFSET,
+    "IQ3_XXS grid must not overlap the IQ2 family tables");
+_Static_assert(IQ3XXS_GRID_OFFSET % 128 == 0 && IQ3XXS_SIGN_OFFSET % 128 == 0 && IQ3XXS_SCRATCH_OFFSET % 128 == 0,
+    "IQ3_XXS VTCM alignment");
+_Static_assert(IQ3XXS_GRID_OFFSET + IQ3XXS_GRID_BYTES <= IQ3XXS_SIGN_OFFSET &&
+               IQ3XXS_SIGN_OFFSET + IQ3XXS_SIGNS_BYTES <= IQ3XXS_SCRATCH_OFFSET &&
+               IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS <= HTP_IQ2S_GRID_VTCM_RESERVE,
+    "IQ3_XXS VTCM regions overlap or exceed the reserve");
 
-static void htp_iq3xxs_grid_copy(struct htp_context * ctx) {
+static void htp_iq3xxs_grid_rebase(struct htp_context * ctx) {
     uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
-    memcpy(base + IQ3XXS_GRID_OFFSET, iq3xxs_grid, sizeof(iq3xxs_grid));
-    memcpy(base + IQ3XXS_SIGN_OFFSET, ksigns_iq2xs, sizeof(ksigns_iq2xs));
-    ctx->iq3xxs_grid = (const uint32_t *) (base + IQ3XXS_GRID_OFFSET);
-    ctx->iq3xxs_signs = base + IQ3XXS_SIGN_OFFSET;
+    ctx->iq3xxs_grid         = (const uint32_t *) (base + IQ3XXS_GRID_OFFSET);
+    ctx->iq3xxs_signs        = base + IQ3XXS_SIGN_OFFSET;
     ctx->iq3xxs_scratch_base = base + IQ3XXS_SCRATCH_OFFSET;
 }
 
+static void htp_iq3xxs_grid_copy(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    memcpy(base + IQ3XXS_GRID_OFFSET, iq3xxs_grid, IQ3XXS_GRID_BYTES);
+    memcpy(base + IQ3XXS_SIGN_OFFSET, ksigns_iq2xs, IQ3XXS_SIGNS_BYTES);
+    htp_iq3xxs_grid_rebase(ctx);
+}
+
+// The IQ2 reserve is taken once; IQ3_XXS only adds tables into its tail.
 static bool htp_iq3xxs_grid_ensure(struct htp_context * ctx) {
     if (!ctx->iq3xxs_grid_ready) {
         htp_iq2s_grid_ensure(ctx);
@@ -356,6 +374,7 @@ static bool htp_iq3xxs_grid_ensure(struct htp_context * ctx) {
     return true;
 }
 
+// VTCM contents are lost on release; rewrite the same bytes in place
 void htp_iq3xxs_grid_refresh(struct htp_context * ctx) {
     if (ctx->iq3xxs_grid_ready) {
         htp_iq3xxs_grid_copy(ctx);
@@ -363,8 +382,10 @@ void htp_iq3xxs_grid_refresh(struct htp_context * ctx) {
 }
 
 static inline HVX_Vector * htp_iq3xxs_scratch_of(const struct htp_ops_context * octx, uint32_t ith) {
-    return (octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER)
-        ? (HVX_Vector *) (octx->ctx->iq3xxs_scratch_base + (size_t) ith * IQ3XXS_SCRATCH_STRIDE) : NULL;
+    if (!(octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER) || !octx->ctx->iq3xxs_scratch_base) {
+        return NULL;
+    }
+    return (HVX_Vector *) (octx->ctx->iq3xxs_scratch_base + (size_t) ith * IQ3XXS_SCRATCH_STRIDE);
 }
 
 // Gather state for the IQ2_S chain. The op flag alone selects it: with the
