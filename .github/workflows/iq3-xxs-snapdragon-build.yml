@@ -1,0 +1,85 @@
+name: IQ3_XXS Snapdragon build
+
+on:
+  push:
+    branches:
+      - hexagon-iq3xxs
+    paths:
+      - "ggml/src/ggml-hexagon/**"
+      - "ggml/include/ggml-hexagon.h"
+      - "docs/backend/snapdragon/**"
+      - "tests/test-backend-ops.cpp"
+      - "tests/CMakeLists.txt"
+      - "tests/test-hexagon-iq2-s-repack.cpp"
+      - ".github/workflows/iq3-xxs-snapdragon-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iq3-xxs-snapdragon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-snapdragon-build:
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/snapdragon-toolchain/arm64-android:v0.7
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          lfs: false
+
+      - name: Configure Snapdragon Android
+        run: |
+          cp docs/backend/snapdragon/CMakeUserPresets.json .
+          cmake --preset arm64-android-snapdragon-release -B build
+
+      - name: Build Snapdragon Android backend
+        run: cmake --build build --target ggml-hexagon -j2
+
+      - name: Build v81 HTP skel
+        run: cmake --build build --target htp-v81 -j2
+
+      - name: Build backend test binary
+        run: cmake --build build --target test-backend-ops -j2
+
+      - name: Build llama tools
+        run: |
+          cmake --build build --target llama-cli -j2
+          cmake --build build --target llama-bench -j2
+
+      - name: Collect v81 test bundle
+        run: |
+          set -euo pipefail
+          mkdir -p iq3xxs-v81-bundle
+          find build -type f \( \
+            -name 'test-backend-ops' -o \
+            -name 'llama-cli' -o \
+            -name 'llama-bench' -o \
+            -name 'libggml*.so' -o \
+            -name 'libggml*.so.*' -o \
+            -name 'libllama*.so' -o \
+            -name 'libllama*.so.*' -o \
+            -name 'libmtmd*.so' -o \
+            -name 'libmtmd*.so.*' \
+          \) -exec cp -L {} iq3xxs-v81-bundle/ \;
+          test -f iq3xxs-v81-bundle/test-backend-ops
+          test -f iq3xxs-v81-bundle/llama-cli
+          test -f iq3xxs-v81-bundle/llama-bench
+          test -f iq3xxs-v81-bundle/libggml-htp-v81.so
+          test -f iq3xxs-v81-bundle/libllama-common.so
+          test -f iq3xxs-v81-bundle/libmtmd.so
+          ls -lh iq3xxs-v81-bundle
+
+      - name: Upload v81 test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: iq3xxs-v81-${{ github.sha }}
+          path: iq3xxs-v81-bundle
+          if-no-files-found: error
