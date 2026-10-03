@@ -1061,6 +1061,42 @@ static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, fl
     tiled_vec_dot_iq3_xxs_32x1(n, s1, vx, vy1, valid_rows, sz1);
 }
 
+static void tiled_vec_dot_iq3_s_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
+    const uint8_t * weights = vx;
+    const uint8_t * activation = vy;
+    for (uint32_t row = 0; row < valid_rows; ++row) {
+        float sum = 0.0f;
+        for (uint32_t kt = 0; kt < n / 32; ++kt) {
+            const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_S;
+            const int8_t * act = (const int8_t *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+            const uint8_t qh = tile[HTP_IQ3S_QH_PLANE_OFFSET + row];
+            const uint8_t scale = tile[HTP_IQ3S_SCALE_PLANE_OFFSET + row];
+            __fp16 d, da;
+            memcpy(&d, tile + HTP_IQ3S_D_PLANE_OFFSET + 2 * row, sizeof(d));
+            memcpy(&da, act + 1024, sizeof(da));
+            const float db = (float) d * (1 + 2 * scale);
+            int32_t dot = 0;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t signs = tile[HTP_IQ3S_SIGN_PLANE_OFFSET + 32 * l + row];
+                for (int j = 0; j < 8; ++j) {
+                    const int i = 2 * l + j / 4;
+                    const unsigned idx = tile[HTP_IQ3S_INDEX_PLANE_OFFSET + 32 * i + row] | (((qh >> i) & 1u) << 8);
+                    const int magnitude = (iq3s_grid[idx] >> (8 * (j % 4))) & 255;
+                    const int weight = (signs & (1u << j)) ? -magnitude : magnitude;
+                    dot += weight * act[i * 128 + j % 4];
+                }
+            }
+            sum += (float) dot * db * (float) da;
+        }
+        s[row] = sum + (sz ? sz[row] : 0.0f);
+    }
+}
+
+static void tiled_vec_dot_iq3_s_32x2(const uint32_t n, float * restrict s0, float * restrict s1, const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows, const float * restrict sz0, const float * restrict sz1) {
+    tiled_vec_dot_iq3_s_32x1(n, s0, vx, vy0, valid_rows, sz0);
+    tiled_vec_dot_iq3_s_32x1(n, s1, vx, vy1, valid_rows, sz1);
+}
+
 static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, HVX_Vector aux, int l, const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
     HVX_Vector idx0 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l)))));
     HVX_Vector idx1 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l + 32)))));

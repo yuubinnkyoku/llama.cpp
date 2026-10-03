@@ -761,6 +761,7 @@ MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
+MATMUL_2D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x2, tiled_vec_dot_iq3_s_32x1)
 MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -936,6 +937,7 @@ MATVEC_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x1)
 MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X1)
+MATVEC_2D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x1)
 MATVEC_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x1)
 MATVEC_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x1)
@@ -1081,6 +1083,7 @@ MATMUL_4D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
+MATMUL_4D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x2, tiled_vec_dot_iq3_s_32x1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -1830,6 +1833,10 @@ static int hvx_mm_init_vec_dot(struct htp_mm_context * mmctx, enum htp_data_type
             mmctx->type         = "iq3_xxs_tiled-f32";
             mmctx->vec_dot_32x1 = tiled_vec_dot_iq3_xxs_32x1;
             return 0;
+        case HTP_TYPE_IQ3_S:
+            mmctx->type         = "iq3_s_tiled-f32";
+            mmctx->vec_dot_32x1 = tiled_vec_dot_iq3_s_32x1;
+            return 0;
         case HTP_TYPE_Q5_K:
             mmctx->type         = "q5_k_tiled-f32";
             mmctx->vec_dot_32x1 = tiled_vec_dot_q5_k_32x1;
@@ -1900,7 +1907,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                         src0->type == HTP_TYPE_Q4_K || src0->type == HTP_TYPE_Q5_K ||
                         src0->type == HTP_TYPE_IQ2_S ||
                         src0->type == HTP_TYPE_IQ2_XS || src0->type == HTP_TYPE_IQ2_XXS ||
-                        src0->type == HTP_TYPE_IQ3_XXS);
+                        src0->type == HTP_TYPE_IQ3_XXS || src0->type == HTP_TYPE_IQ3_S);
 
     // Compute src0_nrows_per_thread
     mmctx->src0_nrows_per_thread  = fastdiv(nrows + octx->n_threads - 1, &octx->n_threads_div);
@@ -1932,6 +1939,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_4d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mm_4d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S: matmul_job_func = hvx_mm_4d_repacked_iq3_s; break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_4d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_4d_repacked_q5_k;   break;
                 case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mm_4d_repacked_iq4nl;  break;
@@ -1952,6 +1960,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_2d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mm_2d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S: matmul_job_func = hvx_mm_2d_repacked_iq3_s; break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_2d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_2d_repacked_q5_k;   break;
                 case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mm_2d_repacked_iq4nl;  break;
@@ -1972,6 +1981,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mv_2d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mv_2d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S: matmul_job_func = hvx_mv_2d_repacked_iq3_s; break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mv_2d_repacked_q5_k;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mv_2d_repacked_q6_k;   break;
                 case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mv_2d_repacked_iq4nl;  break;
