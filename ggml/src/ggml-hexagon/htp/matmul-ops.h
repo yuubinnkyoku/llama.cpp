@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "htp-ops.h"
+#include "matmul-tile.h"
 #include "hex-fastdiv.h"
 #include "hex-common.h"
 #include "htp-vtcm.h"
@@ -56,10 +57,6 @@ extern "C" {
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_MXFP4  640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K   768
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q6_K   896
-
-// --- Activation Tiled Block Sizes (including padding) ---
-#define HTP_MM_ACT_TILE_SIZE_Q8_0      1152
-#define HTP_MM_ACT_TILE_SIZE_Q8_1      1280
 
 #define HTP_MM_MAX_PREFETCH 16
 
@@ -226,6 +223,8 @@ static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
         case HTP_TYPE_IQ3_S:
             return HTP_MM_WEIGHT_TILE_SIZE_IQ3_S;
+        case HTP_TYPE_Q2_K:
+            return HTP_MM_WEIGHT_TILE_SIZE_Q2_K;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -256,6 +255,8 @@ static inline uint32_t htp_mm_get_weight_aligned_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ3_XXS;
         case HTP_TYPE_IQ3_S:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ3_S;
+        case HTP_TYPE_Q2_K:
+            return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q2_K;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -298,6 +299,7 @@ static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
         case HTP_TYPE_IQ2_XXS:
         case HTP_TYPE_IQ3_XXS:
         case HTP_TYPE_IQ3_S:
+        case HTP_TYPE_Q2_K:
         case HTP_TYPE_Q5_K:
         case HTP_TYPE_Q6_K:
         case HTP_TYPE_MXFP4:
@@ -541,7 +543,7 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                             wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K ||
                             wtype == HTP_TYPE_IQ2_S ||
                             wtype == HTP_TYPE_IQ2_XS || wtype == HTP_TYPE_IQ2_XXS ||
-                            wtype == HTP_TYPE_IQ3_XXS || wtype == HTP_TYPE_IQ3_S);
+                            wtype == HTP_TYPE_IQ3_XXS || wtype == HTP_TYPE_IQ3_S || wtype == HTP_TYPE_Q2_K);
 
     if (is_fused_nx) {
         const size_t src0_row_size_padded = hex_round_up(src0_row_size, 128);
