@@ -381,6 +381,58 @@ void htp_iq3xxs_grid_refresh(struct htp_context * ctx) {
     }
 }
 
+#define IQ3S_GRID_BYTES 2048
+#define IQ3S_GRID_OFFSET (((IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS) + 127) & ~(size_t) 127)
+#define IQ3S_SCRATCH_OFFSET (((IQ3S_GRID_OFFSET + IQ3S_GRID_BYTES) + 127) & ~(size_t) 127)
+#define IQ3S_SCRATCH_STRIDE 256
+
+_Static_assert(sizeof(iq3s_grid) == IQ3S_GRID_BYTES, "IQ3_S codebook size mismatch");
+_Static_assert(IQ3S_GRID_OFFSET % 128 == 0 && IQ3S_SCRATCH_OFFSET % 128 == 0, "IQ3_S VTCM alignment");
+_Static_assert(IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS <= IQ3S_GRID_OFFSET,
+    "IQ3_S grid must not overlap the IQ3_XXS scratch");
+_Static_assert(IQ3S_GRID_OFFSET + IQ3S_GRID_BYTES <= IQ3S_SCRATCH_OFFSET &&
+               IQ3S_SCRATCH_OFFSET + IQ3S_SCRATCH_STRIDE * HTP_MAX_NTHREADS <= HTP_IQ2S_GRID_VTCM_RESERVE,
+    "IQ3_S VTCM regions overlap or exceed the reserve");
+
+static void htp_iq3s_grid_rebase(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    ctx->iq3s_grid         = (const uint32_t *) (base + IQ3S_GRID_OFFSET);
+    ctx->iq3s_scratch_base = base + IQ3S_SCRATCH_OFFSET;
+}
+
+static void htp_iq3s_grid_copy(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    memcpy(base + IQ3S_GRID_OFFSET, iq3s_grid, IQ3S_GRID_BYTES);
+    htp_iq3s_grid_rebase(ctx);
+}
+
+static bool htp_iq3s_grid_ensure(struct htp_context * ctx) {
+    if (!ctx->iq3s_grid_ready) {
+        htp_iq2s_grid_ensure(ctx);
+        if (!ctx->iq2s_grid_ready) {
+            return false;
+        }
+        htp_iq3s_grid_copy(ctx);
+        ctx->iq3s_grid_ready = true;
+    } else {
+        htp_iq3s_grid_rebase(ctx);
+    }
+    return true;
+}
+
+void htp_iq3s_grid_refresh(struct htp_context * ctx) {
+    if (ctx->iq3s_grid_ready) {
+        htp_iq3s_grid_copy(ctx);
+    }
+}
+
+static inline HVX_Vector * htp_iq3s_scratch_of(const struct htp_ops_context * octx, uint32_t ith) {
+    if (!(octx->flags & HTP_OPFLAGS_IQ3S_GATHER) || !octx->ctx->iq3s_scratch_base) {
+        return NULL;
+    }
+    return (HVX_Vector *) (octx->ctx->iq3s_scratch_base + (size_t) ith * IQ3S_SCRATCH_STRIDE);
+}
+
 static inline HVX_Vector * htp_iq3xxs_scratch_of(const struct htp_ops_context * octx, uint32_t ith) {
     if (!(octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER) || !octx->ctx->iq3xxs_scratch_base) {
         return NULL;
@@ -1872,6 +1924,10 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
 
     if ((octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER) && !htp_iq3xxs_grid_ensure(octx->ctx)) {
+        return HTP_STATUS_VTCM_TOO_SMALL;
+    }
+
+    if ((octx->flags & HTP_OPFLAGS_IQ3S_GATHER) && !htp_iq3s_grid_ensure(octx->ctx)) {
         return HTP_STATUS_VTCM_TOO_SMALL;
     }
 

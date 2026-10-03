@@ -170,6 +170,7 @@ enum htp_op_flags {
     HTP_OPFLAGS_STUB        = (1U << 0),
     HTP_OPFLAGS_IQ2S_GATHER = (1U << 1),
     HTP_OPFLAGS_IQ3XXS_GATHER = (1U << 2),
+    HTP_OPFLAGS_IQ3S_GATHER = (1U << 3),
 };
 
 // top-of-VTCM region reserved for the IQ2_S codebook (iq2s_grid + sign LUT)

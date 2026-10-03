@@ -109,6 +109,7 @@ static int    opt_gdn_select = 2; // 2 = HMX -> HVX, 1 = HVX, 0 = CPU (unsupport
 static int    opt_ar_select = 2; // 2 = fused ALLREDUCE+ADD (DMA, default), 1 = unfused ALLREDUCE (DMA), 0 = fallback to CPY+FENCE
 static int    opt_iq2s_gather = 0; // IQ2_S matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
 static int    opt_iq3xxs_gather = 0;
+static int    opt_iq3s_gather = 0;
 
 // Default PMU events, if profiling with PMU (mode=2) is enabled
 // See https://docs.qualcomm.com/doc/80-N2040-60/topic/pmu-events.html
@@ -3045,6 +3046,14 @@ struct ggml_hexagon_opbatch {
                 }
             }
         }
+        if (opt_iq3s_gather) {
+            for (const auto * in : node.get_inputs()) {
+                if (in && in->type == GGML_TYPE_IQ3_S) {
+                    o.flags |= HTP_OPFLAGS_IQ3S_GATHER;
+                    break;
+                }
+            }
+        }
 
         ggml_hexagon_dump_op_exec(sess->c_name(), ops[n], o.flags);
 
@@ -4564,10 +4573,10 @@ void ggml_hexagon_session::allocate(const ggml_hexagon_device_config & config) n
     }
 
     // keep host kparams budgets in sync with the DSP-side IQ2_S codebook reserve
-    if (opt_iq2s_gather || opt_iq3xxs_gather) {
+    if (opt_iq2s_gather || opt_iq3xxs_gather || opt_iq3s_gather) {
         this->vtcm_size -= HTP_IQ2S_GRID_VTCM_RESERVE;
-        GGML_LOG_INFO("ggml-hex: %s %s gather: reserving %d KiB VTCM for the codebook\n",
-                      this->c_name(), opt_iq3xxs_gather ? "IQ3_XXS" : "IQ2_S", HTP_IQ2S_GRID_VTCM_RESERVE / 1024);
+        GGML_LOG_INFO("ggml-hex: %s gather: reserving %d KiB VTCM for IQ codebooks\n",
+                      this->c_name(), HTP_IQ2S_GRID_VTCM_RESERVE / 1024);
     }
 
     // Enable FastRPC QoS mode
@@ -8659,6 +8668,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     const char * str_dma64    = getenv("GGML_HEXAGON_DMA64");
     const char * str_iq2s_gather = getenv("GGML_HEXAGON_IQ2S_GATHER");
     const char * str_iq3xxs_gather = getenv("GGML_HEXAGON_IQ3XXS_GATHER");
+    const char * str_iq3s_gather = getenv("GGML_HEXAGON_IQ3S_GATHER");
 
     // Init Arch first since it affects other defaults
     if (!str_arch) {
@@ -8710,6 +8720,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     opt_hostbuf   = str_hostbuf  ? atoi(str_hostbuf) != 0                 : opt_hostbuf;
     opt_iq2s_gather = str_iq2s_gather ? atoi(str_iq2s_gather) != 0         : opt_iq2s_gather;
     opt_iq3xxs_gather = str_iq3xxs_gather ? atoi(str_iq3xxs_gather) != 0 : opt_iq3xxs_gather;
+    opt_iq3s_gather = str_iq3s_gather ? atoi(str_iq3s_gather) != 0 : opt_iq3s_gather;
 
     // Parse device configuration
     const char * str_devices  = getenv("GGML_HEXAGON_DEVICES");
