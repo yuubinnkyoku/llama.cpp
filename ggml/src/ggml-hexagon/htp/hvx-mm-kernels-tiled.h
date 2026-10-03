@@ -1363,6 +1363,57 @@ static void tiled_vec_dot_q2_K_hvx_32x1(const uint32_t n, float * restrict s, co
     hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
 }
 
+static void tiled_vec_dot_q2_K_hvx_32x2(const uint32_t n, float * restrict s0, float * restrict s1, const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows, const float * restrict sz0, const float * restrict sz1) {
+    const uint8_t * weights = vx;
+    const uint8_t * activation0 = vy0;
+    const uint8_t * activation1 = vy1;
+    HVX_Vector sum0 = Q6_V_vzero();
+    HVX_Vector sum1 = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q2_K;
+        const uint8_t * act0 = activation0 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0;
+        const uint8_t * act1 = activation1 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0;
+        HVX_Vector d = hvx_vmemu(tile + Q2K_D_PLANE_OFFSET);
+        HVX_Vector dmin = Q6_V_vror_VR(d, Q2K_DMIN_PLANE_OFFSET - Q2K_D_PLANE_OFFSET);
+        HVX_Vector da0 = hvx_vmemu(act0 + HTP_MM_ACT_SCALE_PLANE_OFFSET_Q8_0);
+        HVX_Vector da1 = hvx_vmemu(act1 + HTP_MM_ACT_SCALE_PLANE_OFFSET_Q8_0);
+        HVX_Vector tile_sum0 = Q6_V_vzero();
+        HVX_Vector tile_sum1 = Q6_V_vzero();
+        #pragma unroll(1)
+        for (int subgroup = 0; subgroup < 2; ++subgroup) {
+            HVX_Vector dot0 = Q6_V_vzero();
+            HVX_Vector dot1 = Q6_V_vzero();
+            HVX_Vector suma0 = Q6_V_vzero();
+            HVX_Vector suma1 = Q6_V_vzero();
+            #pragma unroll(1)
+            for (int p = 4 * subgroup; p < 4 * subgroup + 4; ++p) {
+                HVX_Vector q = q2k_unpack_quant_plane_32(tile, p);
+                HVX_Vector a0 = hvx_vmemu(act0 + p * sizeof(HVX_Vector));
+                HVX_Vector a1 = hvx_vmemu(act1 + p * sizeof(HVX_Vector));
+                dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, q, a0);
+                dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, q, a1);
+                suma0 = Q6_Vw_vrmpyacc_VwVbVb(suma0, a0, Q6_Vb_vsplat_R(1));
+                suma1 = Q6_Vw_vrmpyacc_VwVbVb(suma1, a1, Q6_Vb_vsplat_R(1));
+            }
+            HVX_Vector sc = q2k_widen_bytes_32(tile + (subgroup ? Q2K_SCALE1_PLANE_OFFSET : Q2K_SCALE0_PLANE_OFFSET));
+            HVX_Vector scale = Q6_Vsf_equals_Vw(Q6_V_vand_VV(sc, Q6_V_vsplat_R(15)));
+            HVX_Vector min = Q6_Vsf_equals_Vw(Q6_Vuw_vlsr_VuwR(sc, 4));
+            tile_sum0 = hvx_vec_add_f32_f32(tile_sum0, q2k_subgroup_f32(dot0, suma0, scale, min, d, dmin, da0));
+            tile_sum1 = hvx_vec_add_f32_f32(tile_sum1, q2k_subgroup_f32(dot1, suma1, scale, min, d, dmin, da1));
+        }
+        sum0 = hvx_vec_add_f32_f32(sum0, tile_sum0);
+        sum1 = hvx_vec_add_f32_f32(sum1, tile_sum1);
+    }
+    if (sz0) {
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vmemu(sz0));
+    }
+    if (sz1) {
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vmemu(sz1));
+    }
+    hvx_vec_store_u(s0, valid_rows * sizeof(float), sum0);
+    hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
+}
+
 static void tiled_vec_dot_q4_0_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
     const uint8_t * restrict tile_ptr = vx;
     const uint8_t * restrict y_q = vy;
