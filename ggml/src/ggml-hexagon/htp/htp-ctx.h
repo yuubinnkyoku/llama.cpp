@@ -112,6 +112,11 @@ struct htp_context {
     const uint64_t *       iq2s_grid;
     uint8_t *              iq2s_scratch_base;
 
+    bool                   iq3xxs_grid_ready;
+    const uint32_t *       iq3xxs_grid;
+    const uint8_t *        iq3xxs_signs;
+    uint8_t *              iq3xxs_scratch_base;
+
     uint64_t               max_vmem;
     struct htp_dirty_range dirty_ranges[HTP_MAX_DIRTY_RANGES];
 
@@ -181,8 +186,9 @@ int op_im2col(struct htp_ops_context * octx);
 int op_allreduce(struct htp_ops_context * octx);
 int op_roll(struct htp_ops_context * octx);
 
-// IQ2_S VTCM codebook management (matmul-ops.c)
+// IQ VTCM codebook management (matmul-ops.c)
 void htp_iq2s_grid_ensure(struct htp_context * ctx);
 void htp_iq2s_grid_refresh(struct htp_context * ctx);
+void htp_iq3xxs_grid_refresh(struct htp_context * ctx);
 
 #endif /* HTP_CTX_H */

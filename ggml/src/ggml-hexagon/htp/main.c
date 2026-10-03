@@ -297,8 +297,9 @@ static void vtcm_acquire(struct htp_context * ctx) {
         ctx->vtcm_needs_release = false;
         ctx->vtcm_valid = true;
 
-        // VTCM contents are lost on release; recopy the IQ2_S codebook if it was placed
+        // VTCM contents are lost on release; recopy initialized codebooks.
         htp_iq2s_grid_refresh(ctx);
+        htp_iq3xxs_grid_refresh(ctx);
 
         // Drop the priority to make sure we get the release callback from other GGML-HTP and QNN-HTP sessions
         HAP_compute_res_update_priority(ctx->vtcm_rctx, ctx->thread_prio + 10);
@@ -353,6 +354,10 @@ static int vtcm_alloc(struct htp_context * ctx) {
     ctx->iq2s_grid_ready   = false;
     ctx->iq2s_grid         = NULL;
     ctx->iq2s_scratch_base = NULL;
+    ctx->iq3xxs_grid_ready = false;
+    ctx->iq3xxs_grid = NULL;
+    ctx->iq3xxs_signs = NULL;
+    ctx->iq3xxs_scratch_base = NULL;
 
     return 0;
 }

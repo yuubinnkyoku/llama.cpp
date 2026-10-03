@@ -34,6 +34,7 @@ MANAGED_ENV_NAMES = (
     "GGML_HEXAGON_GDN_SELECT",
     "GGML_HEXAGON_AR_SELECT",
     "GGML_HEXAGON_IQ2S_GATHER",
+    "GGML_HEXAGON_IQ3XXS_GATHER",
     "GGML_HEXAGON_ETM",
     "GGML_HEXAGON_ARCH",
     "GGML_HEXAGON_OPTRACE",
@@ -174,6 +175,7 @@ def main():
     parser.add_argument("--hex-arch", help="Target Hexagon NPU architecture version override (v73, v75, v79, v81, etc.) (GGML_HEXAGON_ARCH)")
     parser.add_argument("--hex-optrace", help="Trace buffer size in number of records (GGML_HEXAGON_OPTRACE)")
     parser.add_argument("--hex-iq2s-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ2_S VTCM vgather codebook lookup (GGML_HEXAGON_IQ2S_GATHER)")
+    parser.add_argument("--hex-iq3xxs-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ3_XXS VTCM vgather dot (GGML_HEXAGON_IQ3XXS_GATHER, default 0)")
 
     # OpenCL specific parameters
     parser.add_argument("--cl-platform", help="Select OpenCL platform name/regex (e.g. Qualified Qualcomm OpenCL platform) (GGML_OPENCL_PLATFORM)")
@@ -316,6 +318,7 @@ def main():
     set_env("GGML_HEXAGON_ARCH", args.hex_arch)
     set_env("GGML_HEXAGON_OPTRACE", args.hex_optrace)
     set_env("GGML_HEXAGON_IQ2S_GATHER", args.hex_iq2s_gather)
+    set_env("GGML_HEXAGON_IQ3XXS_GATHER", args.hex_iq3xxs_gather)
     set_env("MTMD_BACKEND_DEVICE", args.mtmd_device)
 
     # OpenCL environment variables
