@@ -509,6 +509,11 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
 #define IQ3XXS_DOT_2X2(n, s0, s1, w, a0, a1, rows, z0, z1) \
     tiled_vec_dot_iq3_xxs_gather_32x2(n, s0, s1, w, a0, a1, rows, z0, z1, octx->ctx->iq3xxs_grid, octx->ctx->iq3xxs_signs, htp_iq3xxs_scratch_of(octx, ith))
 
+#define IQ3S_DOT_2X1(n, s, w, a, rows, z) \
+    tiled_vec_dot_iq3_s_gather_32x1(n, s, w, a, rows, z, octx->ctx->iq3s_grid, htp_iq3s_scratch_of(octx, ith))
+#define IQ3S_DOT_2X2(n, s0, s1, w, a0, a1, rows, z0, z1) \
+    tiled_vec_dot_iq3_s_gather_32x2(n, s0, s1, w, a0, a1, rows, z0, z1, octx->ctx->iq3s_grid, htp_iq3s_scratch_of(octx, ith))
+
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
 static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void * data) {                                                 \
     htp_matmul_preamble;                                                                                                                   \
@@ -813,7 +818,7 @@ MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x2, tiled_vec_dot_iq3_s_32x1)
+MATMUL_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -989,7 +994,7 @@ MATVEC_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x1)
 MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X1)
-MATVEC_2D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x1)
+MATVEC_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x1)
 MATVEC_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x1)
@@ -1135,7 +1140,7 @@ MATMUL_4D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
-MATMUL_4D_REPACKED_IMPL(iq3_s,    512,  tiled_vec_dot_iq3_s_32x2, tiled_vec_dot_iq3_s_32x1)
+MATMUL_4D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
@@ -4121,6 +4126,10 @@ static int hmx_mm_op_matmul(struct htp_ops_context * octx, const struct htp_mm_k
 int op_matmul(struct htp_ops_context * octx) {
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
 
+    if (octx->src[0]->type == HTP_TYPE_IQ3_S && (kparams->n_hmx || octx->op != HTP_OP_MUL_MAT)) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
+
     const int status = htp_mm_init_context(octx, kparams);
     if (status != HTP_STATUS_OK) {
         return status;
@@ -4498,6 +4507,9 @@ static inline void scan_expert_ids(
 }
 
 int op_matmul_id(struct htp_ops_context * octx) {
+    if (octx->src[0]->type == HTP_TYPE_IQ3_S) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
     htp_matmul_tensors_preamble;
 
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
@@ -4619,6 +4631,9 @@ int op_matmul_id(struct htp_ops_context * octx) {
 }
 
 int op_matmul_id_nx(struct htp_ops_context * octx) {
+    if (octx->src[0]->type == HTP_TYPE_IQ3_S) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
     struct htp_mm_context mmctx_struct = {0};
     struct htp_mm_context * mmctx = &mmctx_struct;
@@ -4718,6 +4733,9 @@ int op_matmul_id_nx(struct htp_ops_context * octx) {
     return s;
 }
 int op_matmul_nx(struct htp_ops_context * octx) {
+    if (octx->src[0]->type == HTP_TYPE_IQ3_S) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
     const struct htp_mm_kernel_params * kparams = (const struct htp_mm_kernel_params *) octx->kernel_params;
 
     const int status = htp_mm_init_context(octx, kparams);
