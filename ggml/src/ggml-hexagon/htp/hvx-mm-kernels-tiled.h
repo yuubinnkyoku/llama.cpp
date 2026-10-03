@@ -1,3 +1,5 @@
+#include "q2-k-scalar.h"
+
 // Dynamic quantizers that produce tiled activations
 
 static inline void quantize_block_f32_q8_1_tiled(float * restrict x, uint8_t * restrict y_block) {
