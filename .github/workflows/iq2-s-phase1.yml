@@ -1,4 +1,4 @@
-name: IQ2_S phase-1
+name: Hexagon low-bit host regression
 
 on:
   push:
@@ -28,8 +28,8 @@ jobs:
           -DLLAMA_BUILD_TESTS=ON
           -DGGML_NATIVE=OFF
 
-      - name: Build IQ2_S phase-1 test
-        run: cmake --build build --target test-hexagon-iq2-s-repack -j2
+      - name: Build low-bit host tests
+        run: cmake --build build --target test-hexagon-iq2-s-repack test-hexagon-iq3-s-repack test-hexagon-q2-k-repack test-backend-ops -j2
 
-      - name: Run IQ2_S phase-1 test
-        run: ctest --test-dir build -R '^test-hexagon-iq2-s-repack$' --output-on-failure
+      - name: Run low-bit host regression
+        run: ctest --test-dir build -R '^test-hexagon-(iq2-s|iq3-s|q2-k)-repack$' --output-on-failure
