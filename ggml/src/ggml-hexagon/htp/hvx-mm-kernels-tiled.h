@@ -1061,6 +1061,105 @@ static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, fl
     tiled_vec_dot_iq3_xxs_32x1(n, s1, vx, vy1, valid_rows, sz1);
 }
 
+static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, HVX_Vector aux, int l, const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
+    HVX_Vector idx0 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l)))));
+    HVX_Vector idx1 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l + 32)))));
+    HVX_Vector sign_index = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(aux, 7 * l), Q6_V_vsplat_R(127));
+    HVX_Vector sign_offset = Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(124));
+
+    // Each destination is a 128-byte slot in this thread's VTCM scratch.
+    Q6_vgather_ARMVw(&scratch[0], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx0, 2));
+    Q6_vgather_ARMVw(&scratch[1], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx1, 2));
+    Q6_vgather_ARMVw(&scratch[2], (uint32_t) (uintptr_t) signs, 127, sign_offset);
+
+    // Select one byte from each aligned sign-table word, then repeat it four times.
+    HVX_Vector shift = Q6_Vw_vasl_VwR(Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(3)), 3);
+    HVX_Vector sign = Q6_V_vand_VV(Q6_Vw_vlsr_VwVw(scratch[2], shift), Q6_V_vsplat_R(255));
+    sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 8));
+    sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 16));
+    HVX_VectorPred neg0 = Q6_Q_vcmp_gt_VubVub(Q6_V_vand_VV(sign, Q6_V_vsplat_R(0x08040201)), Q6_V_vzero());
+    HVX_VectorPred neg1 = Q6_Q_vcmp_gt_VubVub(Q6_V_vand_VV(sign, Q6_V_vsplat_R(0x80402010)), Q6_V_vzero());
+    HVX_Vector g0 = scratch[0];
+    HVX_Vector g1 = scratch[1];
+    HVX_Vector w0 = Q6_V_vmux_QVV(neg0, Q6_Vb_vsub_VbVb(Q6_V_vzero(), g0), g0);
+    HVX_Vector w1 = Q6_V_vmux_QVV(neg1, Q6_Vb_vsub_VbVb(Q6_V_vzero(), g1), g1);
+    return Q6_W_vcombine_VV(w1, w0);
+}
+
+static inline HVX_Vector iq3_xxs_scale_vector(const uint8_t * tile, HVX_Vector aux, HVX_Vector activation_scale) {
+    HVX_Vector nibble = Q6_Vsf_equals_Vw(Q6_Vuw_vlsr_VuwR(aux, 28));
+    HVX_Vector half = hvx_vec_splat_f32(0.5f);
+    HVX_Vector factor = hvx_vec_mul_f32_f32(hvx_vec_add_f32_f32(nibble, half), half);
+    // Keep the fp16 d and activation scales; compute their product in fp32.
+    HVX_Vector base = hvx_vec_mul_f16_f16_to_f32_lower32(hvx_vmemu(tile + 384), activation_scale);
+    return hvx_vec_mul_f32_f32(base, factor);
+}
+
+static void tiled_vec_dot_iq3_xxs_gather_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz, const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
+    if (!scratch) {
+        tiled_vec_dot_iq3_xxs_32x1(n, s, vx, vy, valid_rows, sz);
+        return;
+    }
+    const uint8_t * weights = vx;
+    const uint8_t * activation = vy;
+    HVX_Vector sum = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+        const HVX_Vector * act = (const HVX_Vector *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        HVX_Vector aux = hvx_vmemu(tile + 256);
+        HVX_Vector dot = Q6_V_vzero();
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            HVX_VectorPair w = iq3_xxs_unpack_group_gather(tile, aux, l, grid, signs, scratch);
+            dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_lo_W(w), act[2 * l]);
+            dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_hi_W(w), act[2 * l + 1]);
+        }
+        sum = hvx_vec_add_f32_f32(sum, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot), iq3_xxs_scale_vector(tile, aux, act[8])));
+    }
+    if (sz) {
+        sum = hvx_vec_add_f32_f32(sum, hvx_vmemu(sz));
+    }
+    hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
+}
+
+static void tiled_vec_dot_iq3_xxs_gather_32x2(const uint32_t n, float * restrict s0, float * restrict s1, const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows, const float * restrict sz0, const float * restrict sz1, const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
+    if (!scratch) {
+        tiled_vec_dot_iq3_xxs_32x2(n, s0, s1, vx, vy0, vy1, valid_rows, sz0, sz1);
+        return;
+    }
+    const uint8_t * weights = vx;
+    const uint8_t * activation0 = vy0;
+    const uint8_t * activation1 = vy1;
+    HVX_Vector sum0 = Q6_V_vzero();
+    HVX_Vector sum1 = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+        const HVX_Vector * act0 = (const HVX_Vector *) (activation0 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector * act1 = (const HVX_Vector *) (activation1 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        HVX_Vector aux = hvx_vmemu(tile + 256);
+        HVX_Vector dot0 = Q6_V_vzero();
+        HVX_Vector dot1 = Q6_V_vzero();
+        #pragma unroll(1)
+        for (int l = 0; l < 4; ++l) {
+            HVX_VectorPair w = iq3_xxs_unpack_group_gather(tile, aux, l, grid, signs, scratch);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, Q6_V_lo_W(w), act0[2 * l]);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, Q6_V_hi_W(w), act0[2 * l + 1]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, Q6_V_lo_W(w), act1[2 * l]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, Q6_V_hi_W(w), act1[2 * l + 1]);
+        }
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot0), iq3_xxs_scale_vector(tile, aux, act0[8])));
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot1), iq3_xxs_scale_vector(tile, aux, act1[8])));
+    }
+    if (sz0) {
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vmemu(sz0));
+    }
+    if (sz1) {
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vmemu(sz1));
+    }
+    hvx_vec_store_u(s0, valid_rows * sizeof(float), sum0);
+    hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
+}
+
 static void tiled_vec_dot_q4_0_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
     const uint8_t * restrict tile_ptr = vx;
     const uint8_t * restrict y_q = vy;
