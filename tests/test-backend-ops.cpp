@@ -10345,6 +10345,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33,  1, 1024, {2, 3}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 64, 32, 4096, {2, 1}, {1, 1}));
+    // IQ3_S scalar and gather paths: K superblocks, partial row tiles, and batched slices.
+    for (int64_t k : {512, 1024, 4096, 8192}) {
+        for (int64_t m : {16, 31, 32, 33, 63, 64, 65}) {
+            for (int64_t n : {1, 10}) {
+                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, 33,  1, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, 64, 32, 4096, {1, 1}, {1, 1}));
     for (int64_t m : {31, 32, 33, 63, 64, 65}) {
         for (int64_t n : {1, 10}) {
             for (int edge = 0; edge < 6; ++edge) {
