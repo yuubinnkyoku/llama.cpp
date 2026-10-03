@@ -1304,6 +1304,21 @@ static void tiled_vec_dot_iq3_s_gather_32x2(const uint32_t n, float * restrict s
     hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
 }
 
+static inline HVX_Vector q2k_widen_bytes_32(const uint8_t * src) {
+    return Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(src)))));
+}
+
+static inline HVX_Vector q2k_unpack_quant_plane_32(const uint8_t * tile, int plane) {
+    HVX_Vector packed = q2k_widen_bytes_32(tile + Q2K_QUANT_PLANE_OFFSET + 32 * plane);
+    HVX_Vector mask = Q6_V_vsplat_R(3);
+    HVX_Vector q0 = Q6_V_vand_VV(packed, mask);
+    HVX_Vector q1 = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(packed, 2), mask);
+    HVX_Vector q2 = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(packed, 4), mask);
+    HVX_Vector q3 = Q6_Vuw_vlsr_VuwR(packed, 6);
+    return Q6_V_vor_VV(Q6_V_vor_VV(q0, Q6_Vw_vasl_VwR(q1, 8)),
+                       Q6_V_vor_VV(Q6_Vw_vasl_VwR(q2, 16), Q6_Vw_vasl_VwR(q3, 24)));
+}
+
 static void tiled_vec_dot_q4_0_32x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz) {
     const uint8_t * restrict tile_ptr = vx;
     const uint8_t * restrict y_q = vy;
