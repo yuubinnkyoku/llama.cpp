@@ -178,7 +178,7 @@ def main():
     parser.add_argument("--hex-optrace", help="Trace buffer size in number of records (GGML_HEXAGON_OPTRACE)")
     parser.add_argument("--hex-iq2s-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ2_S VTCM vgather codebook lookup (GGML_HEXAGON_IQ2S_GATHER)")
     parser.add_argument("--hex-iq3xxs-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ3_XXS VTCM vgather dot (GGML_HEXAGON_IQ3XXS_GATHER, default 0)")
-    parser.add_argument("--hex-q2k-hvx", nargs="?", const="1", help="Enable (1) or disable (0) Q2_K HVX dot (GGML_HEXAGON_Q2K_HVX, default 0)")
+    parser.add_argument("--hex-q2k-hvx", nargs="?", const="1", help="Enable (1) or disable (0) Q2_K HVX dot (GGML_HEXAGON_Q2K_HVX, default 1)")
     parser.add_argument("--hex-iq3s-gather", nargs="?", const="1", help="Enable (1) or disable (0) IQ3_S VTCM vgather dot (GGML_HEXAGON_IQ3S_GATHER, default 0)")
 
     # OpenCL specific parameters

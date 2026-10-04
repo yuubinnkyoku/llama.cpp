@@ -111,7 +111,7 @@ static int    opt_ar_select = 2; // 2 = fused ALLREDUCE+ADD (DMA, default), 1 = 
 static int    opt_iq2s_gather = 0; // IQ2_S matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
 static int    opt_iq3xxs_gather = 0;
 static int    opt_iq3s_gather = 0;
-static int    opt_q2k_hvx = 0;
+static int    opt_q2k_hvx = 1;
 
 // Default PMU events, if profiling with PMU (mode=2) is enabled
 // See https://docs.qualcomm.com/doc/80-N2040-60/topic/pmu-events.html
