@@ -29,6 +29,7 @@ enum htp_data_type {
     HTP_TYPE_IQ2_XS  = 17,
     HTP_TYPE_IQ4_NL = 20,
     HTP_TYPE_IQ2_S  = 22,
+    HTP_TYPE_IQ4_XS = 23,
     HTP_TYPE_I32    = 26,
     HTP_TYPE_I64    = 27,
     HTP_TYPE_MXFP4  = 39,

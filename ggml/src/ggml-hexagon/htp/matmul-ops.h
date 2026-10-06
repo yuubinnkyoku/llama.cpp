@@ -24,6 +24,9 @@ extern "C" {
 #define HTP_MM_WEIGHT_TILE_SIZE_Q4_1   640
 #define HTP_MM_WEIGHT_TILE_SIZE_Q8_0   1088
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ4_NL 576
+// IQ4_XS stores fp16(d) * signed 6-bit scale as the per-row tile scale, so the
+// tile is bit-identical to the IQ4_NL one and reuses its HVX kernels and LUT.
+#define HTP_MM_WEIGHT_TILE_SIZE_IQ4_XS 576
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ2_S  384
 // IQ2_XS / IQ2_XXS reuse the IQ2_S tile shape (see iq2-family-repack.h)
 #define HTP_MM_WEIGHT_TILE_SIZE_IQ2_F  384
@@ -42,6 +45,7 @@ extern "C" {
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_1   640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q8_0   1152
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ4_NL 640
+#define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ4_XS 640
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_S  384
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ2_F  384
 #define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_MXFP4  640
@@ -203,6 +207,8 @@ static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
             return HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+        case HTP_TYPE_IQ4_XS:
+            return HTP_MM_WEIGHT_TILE_SIZE_IQ4_XS;
         case HTP_TYPE_Q4_1:
         case HTP_TYPE_Q4_K:
             return HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
@@ -229,6 +235,8 @@ static inline uint32_t htp_mm_get_weight_aligned_tile_size(int weight_type) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_0;
+        case HTP_TYPE_IQ4_XS:
+            return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_IQ4_XS;
         case HTP_TYPE_Q4_1:
         case HTP_TYPE_Q4_K:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_1;
@@ -273,6 +281,7 @@ static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
     switch (weight_type) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
+        case HTP_TYPE_IQ4_XS:
         case HTP_TYPE_Q4_1:
         case HTP_TYPE_Q4_K:
         case HTP_TYPE_Q8_0:
@@ -520,7 +529,7 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                             wtype == HTP_TYPE_Q8_0 || wtype == HTP_TYPE_IQ4_NL ||
                             wtype == HTP_TYPE_MXFP4 || wtype == HTP_TYPE_Q6_K ||
                             wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K ||
-                            wtype == HTP_TYPE_IQ2_S ||
+                            wtype == HTP_TYPE_IQ2_S || wtype == HTP_TYPE_IQ4_XS ||
                             wtype == HTP_TYPE_IQ2_XS || wtype == HTP_TYPE_IQ2_XXS);
 
     if (is_fused_nx) {

@@ -1767,6 +1767,11 @@ static int hvx_mm_init_vec_dot(struct htp_mm_context * mmctx, enum htp_data_type
             mmctx->type         = "iq4nl_tiled-f32";
             mmctx->vec_dot_32x1 = tiled_vec_dot_iq4nl_32x1;
             return 0;
+        case HTP_TYPE_IQ4_XS:
+            // same IQ4_NL-compatible tile, LUT and Q8_0 activation
+            mmctx->type         = "iq4xs_tiled-f32";
+            mmctx->vec_dot_32x1 = tiled_vec_dot_iq4nl_32x1;
+            return 0;
         case HTP_TYPE_MXFP4:
             mmctx->type         = "mxfp4_tiled-f32";
             mmctx->vec_dot_32x1 = tiled_vec_dot_mxfp4_32x1;
@@ -1820,6 +1825,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                         src0->type == HTP_TYPE_MXFP4 || src0->type == HTP_TYPE_Q6_K ||
                         src0->type == HTP_TYPE_Q4_K || src0->type == HTP_TYPE_Q5_K ||
                         src0->type == HTP_TYPE_IQ2_S ||
+                        src0->type == HTP_TYPE_IQ4_XS ||
                         src0->type == HTP_TYPE_IQ2_XS || src0->type == HTP_TYPE_IQ2_XXS);
 
     // Compute src0_nrows_per_thread
@@ -1853,7 +1859,8 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_4d_repacked_iq2f;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_4d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_4d_repacked_q5_k;   break;
-                case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mm_4d_repacked_iq4nl;  break;
+                case HTP_TYPE_IQ4_NL:
+                case HTP_TYPE_IQ4_XS: matmul_job_func = hvx_mm_4d_repacked_iq4nl;  break;
                 case HTP_TYPE_MXFP4:  matmul_job_func = hvx_mm_4d_repacked_mxfp4;  break;
                 default:              return HTP_STATUS_NO_SUPPORT;
             }
@@ -1872,7 +1879,8 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_2d_repacked_iq2f;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_2d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_2d_repacked_q5_k;   break;
-                case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mm_2d_repacked_iq4nl;  break;
+                case HTP_TYPE_IQ4_NL:
+                case HTP_TYPE_IQ4_XS: matmul_job_func = hvx_mm_2d_repacked_iq4nl;  break;
                 case HTP_TYPE_MXFP4:  matmul_job_func = hvx_mm_2d_repacked_mxfp4;  break;
                 default:              return HTP_STATUS_NO_SUPPORT;
             }
@@ -1891,7 +1899,8 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mv_2d_repacked_iq2f;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mv_2d_repacked_q5_k;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mv_2d_repacked_q6_k;   break;
-                case HTP_TYPE_IQ4_NL: matmul_job_func = hvx_mv_2d_repacked_iq4nl;  break;
+                case HTP_TYPE_IQ4_NL:
+                case HTP_TYPE_IQ4_XS: matmul_job_func = hvx_mv_2d_repacked_iq4nl;  break;
                 case HTP_TYPE_MXFP4:  matmul_job_func = hvx_mv_2d_repacked_mxfp4;  break;
                 default:              return HTP_STATUS_NO_SUPPORT;
             }

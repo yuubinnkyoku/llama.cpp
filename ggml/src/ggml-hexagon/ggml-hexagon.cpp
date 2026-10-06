@@ -53,6 +53,8 @@
 #include "ggml-quants.h"
 #include "iq2-s-repack.h"
 #include "iq2-family-repack.h"
+#include "iq4-xs-repack.h"
+#include "iq4-xs-alloc.h"
 #include "htp-opnode.h"
 #include "htp-ops.h"
 #include "htp/matmul-ops.h"
@@ -273,7 +275,8 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
            type == GGML_TYPE_MXFP4 || type == GGML_TYPE_Q6_K ||
            type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K ||
            type == GGML_TYPE_IQ2_S ||
-           type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS;
+           type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
+           type == GGML_TYPE_IQ4_XS;
 }
 
 // Size of one repacked row in the DSP tiled layout. The Q6_K, Q5_K and Q4_K tiles store uncompressed scales/mins,
@@ -294,10 +297,21 @@ static inline size_t ggml_hexagon_tiled_row_size(enum ggml_type type, int64_t ne
     if (type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS) {
         return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ2_F / 32);
     }
+    if (type == GGML_TYPE_IQ4_XS) {
+        // eight tiles per superblock: 8 * 576 / 32 = 144 bytes per row,
+        // versus 136 raw bytes. Using ggml_row_size here would underallocate.
+        return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ4_XS / 32);
+    }
     return ggml_row_size(type, ne0);
 }
 
 static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
+    // IQ4_XS tile-scale safety is not HMX fp16-dequant safety: HMX computes
+    // scale * LUT[q] in QFloat16, which additionally needs abs(scale) <= 65504/127.
+    // IQ4_XS is HVX-only until that gate is implemented and tested.
+    if (type == GGML_TYPE_IQ4_XS) {
+        return false;
+    }
     return type == GGML_TYPE_F16 || type == GGML_TYPE_F32 || ggml_hexagon_is_repack_type(type);
 }
 
@@ -425,11 +439,39 @@ static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tens
 
 // ** backend sessions
 
+// IQ4_XS folds the raw fp16(d) * signed 6-bit scale into the tiled fp16 scale
+// plane. That is not always representable, so an allocation must record which
+// representation its bytes hold. The root tensor owns the state; views alias it.
 struct ggml_hexagon_tensor_extra {
     std::vector<uint8_t> shadow_buf;
     size_t               shadow_size { 0 };
     uint32_t             flags { 0 };
+    std::shared_ptr<iq4xs_alloc_state> iq4xs;
 };
+
+// Resolve the allocation state of a tensor, following view_src to its owner so a
+// view never holds an independent copy of the state.
+static inline const iq4xs_alloc_state * ggml_hexagon_iq4xs_state(const struct ggml_tensor * t) {
+    const struct ggml_tensor * root = t->view_src ? t->view_src : t;
+    const auto * extra = root->extra ? (const ggml_hexagon_tensor_extra *) root->extra : nullptr;
+    if (!extra || !extra->iq4xs) {
+        return nullptr;
+    }
+    return extra->iq4xs.get();
+}
+
+// True when the bytes are really tiles. A view must not select the generic tiled
+// getters or descriptors: those would read owner bytes at a view-local offset.
+static inline bool ggml_hexagon_iq4xs_is_repacked(const struct ggml_tensor * t) {
+    if (t->type != GGML_TYPE_IQ4_XS) {
+        return true; // not IQ4_XS: let the existing branches handle it
+    }
+    const iq4xs_alloc_state * st = ggml_hexagon_iq4xs_state(t);
+    return st && st->is_repacked();
+}
+
+// defined with the other IQ4_XS buffer helpers below
+static bool ggml_hexagon_iq4xs_init_layout(ggml_tensor * t);
 
 static inline bool ggml_hexagon_tensor_is_fuseable(const struct ggml_tensor * t) {
     if (!t->extra) return false;
@@ -807,12 +849,30 @@ static enum ggml_status ggml_backend_hexagon_buffer_init_tensor(ggml_backend_buf
     sbuf->tensor_extra.push_back(extra);
 
     tensor->extra = extra;
-    if (ggml_hexagon_is_repack_type(tensor->type)) {
+    if (tensor->type == GGML_TYPE_IQ4_XS) {
+        // IQ4_XS takes its repack intent from the type, not from a support-probe
+        // side effect. The probe runs before this tensor is allocated, so a
+        // needs_repack entry created there cannot be consumed here; requiring
+        // one left every IQ4_XS tensor without the REPACK flag, so set_tensor
+        // skipped the repack and the weight never became REPACKED_SAFE.
+        // Other repack types keep the existing needs_repack semantics.
+        extra->flags |= GGML_HEXAGON_TENSOR_REPACK;
+        sess->needs_repack.erase(tensor);
+    } else if (ggml_hexagon_is_repack_type(tensor->type)) {
         if (sess->needs_repack.count(tensor)) {
             extra->flags |= GGML_HEXAGON_TENSOR_REPACK;
             sess->needs_repack.erase(tensor);
         }
     }
+
+    if (tensor->type == GGML_TYPE_IQ4_XS && !tensor->view_src) {
+        if (!ggml_hexagon_iq4xs_init_layout(tensor)) {
+            GGML_LOG_ERROR("ggml-hex: %s init-tensor %s : unsupported IQ4_XS shape %" PRId64 "x%" PRId64 "\n",
+                    sess->c_name(), tensor->name, tensor->ne[0], tensor->ne[1]);
+        }
+    }
+    // A view keeps no IQ4_XS state of its own: ggml flattens nested views to the
+    // root and sums view_offs, so lookups resolve through view_src instead.
 
     return GGML_STATUS_SUCCESS;
 }
@@ -2196,6 +2256,55 @@ static void repack_tiled_iq2f(void * data, const ggml_tensor * t, size_t offset,
     }
 }
 
+// ** IQ4_XS production preparation and readback
+//
+// The tile is the IQ4_NL one (576 B: 512 B quant plane + 64 B fp16 scale plane),
+// and the 32-wide row stride is 18 B versus 17 B raw, so offsets never map
+// directly between the two representations. The shared helpers live in
+// iq4-xs-alloc.h so the host tests exercise the same code as production.
+
+// Record the root layout once, at init_tensor, before any upload.
+static bool ggml_hexagon_iq4xs_init_layout(ggml_tensor * t) {
+    auto * extra = (ggml_hexagon_tensor_extra *) t->extra;
+    if (!extra) {
+        return false;
+    }
+    if (!extra->iq4xs) {
+        extra->iq4xs = std::make_shared<iq4xs_alloc_state>();
+    }
+    return iq4xs_init_layout(*extra->iq4xs, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
+}
+
+// Scan a complete raw source and commit tiles plus sidecar, or keep the raw bytes.
+static bool ggml_hexagon_iq4xs_prepare(ggml_tensor * t, const void * data, size_t size) {
+    auto * extra = (ggml_hexagon_tensor_extra *) t->extra;
+    if (!extra || !extra->iq4xs) {
+        return false;
+    }
+    // ggml_nbytes() is the raw size, but the primary allocation holds the larger
+    // tiled layout: 144 versus 136 bytes per row, and rows are padded to 32.
+    // Both paddings must match ggml_backend_hexagon_buffer_type_get_alloc_size().
+    const int64_t ne0_p = hex_round_up(t->ne[0], 32);
+    const int64_t ne1_p = hex_round_up(t->ne[1], 32);
+    const size_t alloc_size = ggml_hexagon_tiled_row_size(t->type, ne0_p) *
+                              (size_t) ne1_p * (size_t) t->ne[2] * (size_t) t->ne[3];
+    return iq4xs_prepare(*extra->iq4xs, (const uint8_t *) data, size,
+                         (uint8_t *) t->data, alloc_size);
+}
+
+// Exact raw readback of a logical byte range. base is the start of the owner
+// allocation and logical_offset is already root-relative, because ggml flattens
+// nested views into a single view_src plus accumulated view_offs.
+static bool ggml_hexagon_iq4xs_readback(const ggml_tensor * t, void * data, size_t offset, size_t size) {
+    const iq4xs_alloc_state * st = ggml_hexagon_iq4xs_state(t);
+    if (!st) {
+        return false;
+    }
+    const size_t view_offs = t->view_src ? t->view_offs : 0;
+    const uint8_t * base = (const uint8_t *) t->data - view_offs;
+    return iq4xs_readback(*st, base, offset + view_offs, size, data);
+}
+
 static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t size) {
     switch (tensor->type) {
         case GGML_TYPE_Q4_0:
@@ -2266,6 +2375,32 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     HEX_VERBOSE("ggml-hex: %s set-tensor %s : data %p offset %zu size %zu usage %d flags 0x%x\n",
         sess->c_name(), tensor->name, data, offset, size, (int) buffer->usage, extra->flags);
 
+    if (tensor->type == GGML_TYPE_IQ4_XS && !tensor->view_src) {
+        // complete replacement: scan, then commit tiles + sidecar or raw
+        if (offset == 0 && size >= ggml_nbytes(tensor) && extra->shadow_buf.empty()) {
+            if (!ggml_hexagon_iq4xs_prepare(tensor, data, size)) {
+                GGML_LOG_ERROR("ggml-hex: %s failed to prepare IQ4_XS tensor %s\n", sess->c_name(), tensor->name);
+            }
+            return;
+        }
+        // fragment: assemble in the existing raw shadow, prepare when complete
+        if (extra->shadow_buf.size() < ggml_nbytes(tensor)) {
+            extra->shadow_buf.resize(ggml_nbytes(tensor));
+        }
+        memcpy(extra->shadow_buf.data() + offset, data, size);
+        extra->shadow_size += size;
+
+        if (extra->shadow_size >= ggml_nbytes(tensor)) {
+            if (!ggml_hexagon_iq4xs_prepare(tensor, extra->shadow_buf.data(), extra->shadow_buf.size())) {
+                GGML_LOG_ERROR("ggml-hex: %s failed to prepare IQ4_XS tensor %s\n", sess->c_name(), tensor->name);
+            }
+            extra->shadow_buf.clear();
+            extra->shadow_buf.shrink_to_fit();
+            extra->shadow_size = 0;
+        }
+        return;
+    }
+
     if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) == 0) {
         memcpy((char *) tensor->data + offset, data, size);
         return;
@@ -2301,6 +2436,14 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
 
     HEX_VERBOSE("ggml-hex: %s get-tensor %s : data %p offset %zu size %zu usage %d flags 0x%x\n",
             sess->c_name(), tensor->name, data, offset, size, (int) buffer->usage, extra->flags);
+
+    if (tensor->type == GGML_TYPE_IQ4_XS) {
+        if (!ggml_hexagon_iq4xs_readback(tensor, data, offset, size)) {
+            GGML_LOG_ERROR("ggml-hex: %s cannot read IQ4_XS tensor %s in state %d\n", sess->c_name(),
+                    tensor->name, ggml_hexagon_iq4xs_state(tensor) ? (int) ggml_hexagon_iq4xs_state(tensor)->state : -1);
+        }
+        return;
+    }
 
     if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) == 0) {
         memcpy(data, (const char *) tensor->data + offset, size);
@@ -2407,6 +2550,28 @@ static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buff
     HEX_VERBOSE("ggml-hex: %s set-tensor-2d %s : data %p offset %zu size %zu n_copies %zu stride_tensor %zu stride_data %zu usage %d flags 0x%x\n",
                 sess->c_name(), tensor->name, data, offset, size, n_copies, stride_tensor, stride_data, (int) buffer->usage, extra->flags);
 
+    if (tensor->type == GGML_TYPE_IQ4_XS && !tensor->view_src) {
+        // keep the existing fragmented-upload contract: assemble raw fragments
+        // and prepare once the byte count reaches the complete raw tensor
+        if (extra->shadow_buf.size() < ggml_nbytes(tensor)) {
+            extra->shadow_buf.resize(ggml_nbytes(tensor));
+        }
+        for (size_t i = 0; i < n_copies; i++) {
+            memcpy(extra->shadow_buf.data() + offset + i * stride_tensor, (const uint8_t *) data + i * stride_data, size);
+        }
+        extra->shadow_size += n_copies * size;
+
+        if (extra->shadow_size >= ggml_nbytes(tensor)) {
+            if (!ggml_hexagon_iq4xs_prepare(tensor, extra->shadow_buf.data(), extra->shadow_buf.size())) {
+                GGML_LOG_ERROR("ggml-hex: %s failed to prepare IQ4_XS tensor %s\n", sess->c_name(), tensor->name);
+            }
+            extra->shadow_buf.clear();
+            extra->shadow_buf.shrink_to_fit();
+            extra->shadow_size = 0;
+        }
+        return;
+    }
+
     if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) == 0) {
         for (size_t i = 0; i < n_copies; i++) {
             memcpy((uint8_t *) tensor->data + offset + i * stride_tensor, (const uint8_t *) data + i * stride_data, size);
@@ -2444,6 +2609,19 @@ static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buff
 
     HEX_VERBOSE("ggml-hex: %s get-tensor-2d %s : data %p offset %zu size %zu n_copies %zu stride_tensor %zu stride_data %zu usage %d\n",
                 sess->c_name(), tensor->name, data, offset, size, n_copies, stride_tensor, stride_data, (int) buffer->usage);
+
+    if (tensor->type == GGML_TYPE_IQ4_XS) {
+        // the generic path would force row and 32-row alignment; IQ4_XS reads
+        // each range exactly, so no temporary span and no padding rows are used
+        for (size_t i = 0; i < n_copies; i++) {
+            if (!ggml_hexagon_iq4xs_readback(tensor, (uint8_t *) data + i * stride_data,
+                                             offset + i * stride_tensor, size)) {
+                GGML_LOG_ERROR("ggml-hex: %s cannot read IQ4_XS 2d tensor %s\n", sess->c_name(), tensor->name);
+                return;
+            }
+        }
+        return;
+    }
 
     if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) == 0) {
         for (size_t i = 0; i < n_copies; i++) {
@@ -2786,7 +2964,8 @@ struct ggml_hexagon_opbatch {
 
         int64_t ne0 = t->ne[0];
         int64_t ne1 = t->ne[1];
-        const bool is_repack = (extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0;
+        const bool is_repack = (extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0 &&
+                            ggml_hexagon_iq4xs_is_repacked(t);
         if (is_repack) {
             ne0 = hex_round_up(ne0, 32);
             ne1 = hex_round_up(ne1, 32);
@@ -2832,7 +3011,8 @@ struct ggml_hexagon_opbatch {
         h.data  = t_offset;
         h.type  = t->type;
 
-        const bool is_repack = (extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0;
+        const bool is_repack = (extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0 &&
+                            ggml_hexagon_iq4xs_is_repacked(t);
         if (is_repack) {
             h.ne[0] = hex_round_up(t->ne[0], 32);
             h.ne[1] = hex_round_up(t->ne[1], 32);
@@ -2855,7 +3035,7 @@ struct ggml_hexagon_opbatch {
         if ((extra->flags & GGML_HEXAGON_TENSOR_WEIGHT) != 0) {
             h.flags |= HTP_TENSOR_WEIGHT;
         }
-        if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0) {
+        if ((extra->flags & GGML_HEXAGON_TENSOR_REPACK) != 0 && ggml_hexagon_iq4xs_is_repacked(t)) {
             h.flags |= HTP_TENSOR_REPACK;
         }
         if ((extra->flags & GGML_HEXAGON_TENSOR_FENCE) != 0) {
@@ -3237,6 +3417,9 @@ struct ggml_hexagon_opbatch {
 
         const ggml_tensor * src0 = last_node.src0();
         const ggml_tensor * src1 = last_node.src1();
+
+        // IQ4_XS MUL_MAT+ADD fusion stays off: only the direct path is validated
+        if (src0->type == GGML_TYPE_IQ4_XS) return false;
 
         if (src2->type != GGML_TYPE_F32) return false;
 
@@ -6069,6 +6252,44 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
             }
             break;
 
+        case GGML_TYPE_IQ4_XS:
+            if (!ggml_is_contiguous(src0) || ggml_is_permuted(src0)) {
+                return false;
+            }
+            // one IQ4_XS superblock spans 8 tiles, so K must be 256-aligned
+            if (src0->ne[0] % QK_K != 0) {
+                return false;
+            }
+            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
+                return false;
+            }
+            if (src1->ne[2] % src0->ne[2] != 0 || src1->ne[3] % src0->ne[3] != 0) {
+                return false;
+            }
+
+            // Placement eligibility is decided from type and shape alone. The
+            // allocation state cannot be consulted here: it is only created
+            // after the tensor has been placed on a Hexagon buffer and
+            // uploaded, so requiring REPACKED_SAFE here made placement
+            // unreachable and left every IQ4_XS weight on the CPU.
+            const iq4xs_alloc_state * iq4xs_state;
+            iq4xs_state = ggml_hexagon_iq4xs_state(src0);
+            // A tensor this backend has already allocated has a tensor extra,
+            // which means its representation is already decided: only
+            // REPACKED_SAFE may run, and RAW_FALLBACK must be refused so it
+            // falls back to CPU. A tensor that has not been allocated here has
+            // no extra and no state, and refusing it would make placement
+            // unreachable, so the state could never be created in the first
+            // place.
+            if (src0->buffer && src0->extra && (!iq4xs_state || !iq4xs_state->is_repacked())) {
+                return false;
+            }
+
+            if (!src0->buffer) {
+                sess->needs_repack.insert(src0);
+            }
+            break;
+
         case GGML_TYPE_F16:
             if (src0->nb[1] < src0->nb[0]) {
                 return false;
@@ -6992,6 +7213,9 @@ static bool is_supported_mul_mat_nx_kernel(const ggml_tensor * src0, const struc
         return kparams->kernel_type == HTP_MM_KERNEL_HMX_2D;
     }
 
+    // IQ4_XS is direct-HVX-only: the Nx path has no validated IQ4_XS kernel
+    if (src0->type == GGML_TYPE_IQ4_XS) return false;
+
     if (!ggml_hexagon_is_repack_type(src0->type) || src0->type == GGML_TYPE_Q6_K) {
         return false;  // Q6_K has no fused HVX kernel
     }
@@ -7003,6 +7227,8 @@ static bool is_supported_mul_mat_id_nx_kernel(const ggml_tensor * src0, const st
     if (kparams->n_hmx) {
         return kparams->kernel_type == HTP_MM_KERNEL_HMX_2D;
     }
+
+    if (src0->type == GGML_TYPE_IQ4_XS) return false;
 
     if (!ggml_hexagon_is_repack_type(src0->type)) {
         return false;
@@ -7019,6 +7245,7 @@ static bool is_mergeable_mul_mat(const ggml_tensor * t) {
     if (src1->type != GGML_TYPE_F32) return false;
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
+    if (src0->type == GGML_TYPE_IQ4_XS) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
 
     if (mm_is_hmx_eligible(t)) {
@@ -7053,6 +7280,7 @@ static bool is_mergeable_mul_mat_id(const ggml_tensor * t) {
     const ggml_tensor * src0 = t->src[0];
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
+    if (src0->type == GGML_TYPE_IQ4_XS) return false;
     return ggml_hexagon_is_repack_type(src0->type);
 }
 
@@ -7088,6 +7316,26 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
         return GGML_STATUS_FAILED;
     }
 
+    // IQ4_XS execution gate. Support queries and cached nodes were decided from
+    // type/shape, and graph placement does not rerun after a later set_tensor,
+    // so the current allocation state is rechecked here before any enqueue.
+    // RAW_FALLBACK must never reach the DSP as tiled data.
+    for (int i = 0; i < graph->n_nodes; i++) {
+        const struct ggml_tensor * node = graph->nodes[i];
+        if (!node->src[0] || node->src[0]->type != GGML_TYPE_IQ4_XS) {
+            continue;
+        }
+        const iq4xs_alloc_state * state = ggml_hexagon_iq4xs_state(node->src[0]);
+        if (!state || !state->is_repacked()) {
+            GGML_LOG_ERROR("ggml-hex: %s rejecting %s on IQ4_XS weight %s in state %d: "
+                    "rebuild the scheduler after a representation change\n",
+                    sess->c_name(), ggml_op_name(node->op), node->src[0]->name,
+                    state ? (int) state->state : -1);
+            sess->last_error = HTP_STATUS_NO_SUPPORT;
+            return GGML_STATUS_FAILED;
+        }
+    }
+
     HEX_VERBOSE("ggml-hex: %s graph-compute n_nodes %d\n", sess->c_name(), graph->n_nodes);
 
     const std::vector<htp_opnode> * nodes_ptr = nullptr;
@@ -7108,6 +7356,8 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
             if (graph->nodes[i]->op == GGML_OP_RMS_NORM && ggml_can_fuse(graph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
                 extra->flags |= GGML_HEXAGON_TENSOR_FUSEABLE;
             } else if (graph->nodes[i]->op == GGML_OP_MUL_MAT || graph->nodes[i]->op == GGML_OP_MUL_MAT_ID) {
+                // IQ4_XS direct MUL_MAT only: never tag it FUSEABLE
+                if (graph->nodes[i]->src[0] && graph->nodes[i]->src[0]->type == GGML_TYPE_IQ4_XS) continue;
                 if ((i + 1 < graph->n_nodes && graph->nodes[i + 1]->op == GGML_OP_ADD && ggml_can_fuse(graph, i, { graph->nodes[i]->op, GGML_OP_ADD })) ||
                     ggml_node_has_n_uses(graph, i, 1)) {
                     extra->flags |= GGML_HEXAGON_TENSOR_FUSEABLE;
@@ -7526,6 +7776,13 @@ static bool ggml_hexagon_cpy_tensor_async_virt(ggml_backend_t backend_src, ggml_
 
 static bool ggml_backend_hexagon_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst) {
     if (!ggml_backend_is_hexagon(backend_src) || !ggml_backend_is_hexagon(backend_dst)) {
+        return false;
+    }
+
+    // IQ4_XS needs its allocation state and metadata sidecar to travel with the
+    // bytes. This path only copies flags and enqueues a device copy, which would
+    // silently drop them, so fall back to the get/set copy instead.
+    if (src->type == GGML_TYPE_IQ4_XS || dst->type == GGML_TYPE_IQ4_XS) {
         return false;
     }
 
@@ -8513,6 +8770,8 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     static_assert((unsigned int) HTP_TYPE_IQ2_XXS == (unsigned int) GGML_TYPE_IQ2_XXS,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_IQ2_XS == (unsigned int) GGML_TYPE_IQ2_XS,
+                  "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_IQ4_XS == (unsigned int) GGML_TYPE_IQ4_XS,
                   "please update hexagon_type to match ggml_type");
 
     const char * str_verbose  = getenv("GGML_HEXAGON_VERBOSE");
