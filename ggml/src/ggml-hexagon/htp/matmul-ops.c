@@ -350,6 +350,52 @@ void htp_iq3xxs_grid_refresh(struct htp_context * ctx) {
     }
 }
 
+#define IQ3S_GRID_BYTES 2048
+#define IQ3S_GRID_OFFSET (((IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS + 127) / 128) * 128)
+#define IQ3S_SCRATCH_OFFSET (((IQ3S_GRID_OFFSET + IQ3S_GRID_BYTES + 127) / 128) * 128)
+#define IQ3S_SCRATCH_STRIDE 256
+
+_Static_assert(sizeof(iq3s_grid) == IQ3S_GRID_BYTES, "IQ3_S grid size mismatch");
+_Static_assert(IQ3S_GRID_OFFSET >= IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS,
+    "IQ3_S grid overlaps the IQ3_XXS scratch");
+_Static_assert(IQ3S_GRID_OFFSET % 128 == 0 && IQ3S_SCRATCH_OFFSET % 128 == 0,
+    "IQ3_S VTCM regions must be 128-byte aligned");
+_Static_assert(IQ3S_GRID_OFFSET + IQ3S_GRID_BYTES <= IQ3S_SCRATCH_OFFSET &&
+               IQ3S_SCRATCH_OFFSET + IQ3S_SCRATCH_STRIDE * HTP_MAX_NTHREADS <= HTP_IQ2S_GRID_VTCM_RESERVE,
+    "IQ3_S regions exceed the shared IQ2 VTCM reserve");
+
+static void htp_iq3s_grid_rebase(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    ctx->iq3s_grid = (const uint32_t *) (base + IQ3S_GRID_OFFSET);
+    ctx->iq3s_scratch_base = base + IQ3S_SCRATCH_OFFSET;
+}
+
+static void htp_iq3s_grid_copy(struct htp_context * ctx) {
+    uint8_t * base = ctx->vtcm_base + ctx->vtcm_size;
+    memcpy(base + IQ3S_GRID_OFFSET, iq3s_grid, IQ3S_GRID_BYTES);
+    htp_iq3s_grid_rebase(ctx);
+}
+
+bool htp_iq3s_grid_ensure(struct htp_context * ctx) {
+    if (ctx->iq3s_grid_ready) {
+        htp_iq3s_grid_rebase(ctx);
+        return true;
+    }
+    htp_iq2s_grid_ensure(ctx);
+    if (!ctx->iq2s_grid_ready) {
+        return false;
+    }
+    htp_iq3s_grid_copy(ctx);
+    ctx->iq3s_grid_ready = true;
+    return true;
+}
+
+void htp_iq3s_grid_refresh(struct htp_context * ctx) {
+    if (ctx->iq3s_grid_ready) {
+        htp_iq3s_grid_copy(ctx);
+    }
+}
+
 // Called from the single-threaded matmul setup path before worker threads run
 void htp_iq2s_grid_ensure(struct htp_context * ctx) {
     if (ctx->iq2s_grid_ready) {
@@ -425,6 +471,18 @@ static inline HVX_Vector * htp_iq3xxs_scratch_of(const struct htp_ops_context * 
     return (HVX_Vector *) (octx->ctx->iq3xxs_scratch_base + (size_t) ith * IQ3XXS_SCRATCH_STRIDE);
 }
 
+static inline const uint32_t * htp_iq3s_grid_of(const struct htp_ops_context * octx) {
+    return ((octx->flags & HTP_OPFLAGS_IQ3S_GATHER) && octx->ctx->iq3s_grid)
+        ? octx->ctx->iq3s_grid : iq3s_grid;
+}
+
+static inline HVX_Vector * htp_iq3s_scratch_of(const struct htp_ops_context * octx, uint32_t ith) {
+    if (!(octx->flags & HTP_OPFLAGS_IQ3S_GATHER) || !octx->ctx->iq3s_scratch_base) {
+        return NULL;
+    }
+    return (HVX_Vector *) (octx->ctx->iq3s_scratch_base + (size_t) ith * IQ3S_SCRATCH_STRIDE);
+}
+
 // vec_dot dispatch for the ID paths; the IQ2_S variant carries grid + scratch
 static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t ith, const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy, uint32_t valid_rows) {
     if (mmctx->vec_dot_32x1_iq2s) {
@@ -463,6 +521,12 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
 #define IQ3XXS_DOT_2X2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1) \
     tiled_vec_dot_iq3_xxs_32x2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1, \
                               htp_iq3xxs_grid_of(octx), htp_iq3xxs_signs_of(octx), htp_iq3xxs_scratch_of(octx, ith))
+#define IQ3S_DOT_2X1(ne10, dst_ptr, w_tile, src1_col, valid_rows, src2_ptr) \
+    tiled_vec_dot_iq3_s_32x1(ne10, dst_ptr, w_tile, src1_col, valid_rows, src2_ptr, \
+                            htp_iq3s_grid_of(octx), htp_iq3s_scratch_of(octx, ith))
+#define IQ3S_DOT_2X2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1) \
+    tiled_vec_dot_iq3_s_32x2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1, \
+                            htp_iq3s_grid_of(octx), htp_iq3s_scratch_of(octx, ith))
 
 // Specialized repacked matmul macros
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
@@ -769,6 +833,7 @@ MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
+MATMUL_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
 MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_2D_REPACKED_IMPL(q3_k,       512,  tiled_vec_dot_q3_k_32x2,  tiled_vec_dot_q3_k_32x1)
@@ -990,6 +1055,7 @@ MATVEC_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x1)
 MATVEC_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X1)
+MATVEC_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X1)
 MATVEC_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x1)
 MATVEC_2D_REPACKED_IMPL(q3_k,       512,  tiled_vec_dot_q3_k_32x1)
@@ -1139,6 +1205,7 @@ MATMUL_4D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_do
 MATMUL_4D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
+MATMUL_4D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
 MATMUL_4D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
 MATMUL_4D_REPACKED_IMPL(q3_k,       512,  tiled_vec_dot_q3_k_32x2,  tiled_vec_dot_q3_k_32x1)
@@ -1889,6 +1956,9 @@ static int hvx_mm_init_vec_dot(struct htp_mm_context * mmctx, enum htp_data_type
         case HTP_TYPE_IQ3_XXS:
             mmctx->type = "iq3_xxs_tiled-f32";
             return 0;
+        case HTP_TYPE_IQ3_S:
+            mmctx->type = "iq3_s_tiled-f32";
+            return 0;
         case HTP_TYPE_Q5_K:
             mmctx->type         = "q5_k_tiled-f32";
             mmctx->vec_dot_32x1 = tiled_vec_dot_q5_k_32x1;
@@ -1942,6 +2012,9 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
     if (octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER) {
         htp_iq3xxs_grid_ensure(octx->ctx);
     }
+    if ((octx->flags & HTP_OPFLAGS_IQ3S_GATHER) && !htp_iq3s_grid_ensure(octx->ctx)) {
+        return HTP_STATUS_VTCM_TOO_SMALL;
+    }
 
     const uint32_t src0_nrows = ne01;
     const uint32_t src1_nrows = ne11 * ne12 * ne13;
@@ -1971,6 +2044,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                         src0->type == HTP_TYPE_Q4_K || src0->type == HTP_TYPE_Q5_K ||
                         src0->type == HTP_TYPE_IQ2_S ||
                         src0->type == HTP_TYPE_IQ3_XXS ||
+                        src0->type == HTP_TYPE_IQ3_S ||
                         src0->type == HTP_TYPE_IQ4_XS ||
                         src0->type == HTP_TYPE_IQ2_XS || src0->type == HTP_TYPE_IQ2_XXS ||
                         src0->type == HTP_TYPE_Q3_K || src0->type == HTP_TYPE_Q2_K);
@@ -2005,6 +2079,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_4d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mm_4d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S:   matmul_job_func = hvx_mm_4d_repacked_iq3_s;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_4d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_4d_repacked_q5_k;   break;
                 case HTP_TYPE_Q3_K:   matmul_job_func = hvx_mm_4d_repacked_q3_k;   break;
@@ -2028,6 +2103,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mm_2d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mm_2d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S:   matmul_job_func = hvx_mm_2d_repacked_iq3_s;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mm_2d_repacked_q6_k;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mm_2d_repacked_q5_k;   break;
                 case HTP_TYPE_Q3_K:   matmul_job_func = hvx_mm_2d_repacked_q3_k;   break;
@@ -2051,6 +2127,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mv_2d_repacked_iq2f;   break;
                 case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mv_2d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_S:   matmul_job_func = hvx_mv_2d_repacked_iq3_s;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mv_2d_repacked_q5_k;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mv_2d_repacked_q6_k;   break;
                 case HTP_TYPE_Q3_K:   matmul_job_func = hvx_mv_2d_repacked_q3_k;   break;

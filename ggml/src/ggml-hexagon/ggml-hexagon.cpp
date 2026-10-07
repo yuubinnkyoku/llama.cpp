@@ -54,6 +54,7 @@
 #include "iq2-s-repack.h"
 #include "iq2-family-repack.h"
 #include "iq3-xxs-repack.h"
+#include "iq3-s-repack.h"
 #include "iq4-xs-repack.h"
 #include "iq4-xs-alloc.h"
 #include "htp-opnode.h"
@@ -111,6 +112,7 @@ static int    opt_ar_select  = 2; // 2 = fused ALLREDUCE+ADD (default), 1 = unfu
 static int    opt_ar_scatter = 1; // 1 = reduce-scatter the fused ALLREDUCE+ADD (default), 0 = full reduction
 static int    opt_iq2s_gather = 0; // IQ2_S matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
 static int    opt_iq3xxs_gather = 0; // IQ3_XXS matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
+static int    opt_iq3s_gather = 0; // IQ3_S matmul: VTCM vgather codebook lookup (1 = on, scalar fallback)
 
 // Default PMU events, if profiling with PMU (mode=2) is enabled
 // See https://docs.qualcomm.com/doc/80-N2040-60/topic/pmu-events.html
@@ -280,6 +282,7 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
            type == GGML_TYPE_IQ2_S ||
            type == GGML_TYPE_IQ2_XS || type == GGML_TYPE_IQ2_XXS ||
            type == GGML_TYPE_IQ3_XXS ||
+           type == GGML_TYPE_IQ3_S ||
            type == GGML_TYPE_IQ4_XS ||
            type == GGML_TYPE_Q3_K || type == GGML_TYPE_Q2_K;
 }
@@ -305,6 +308,9 @@ static inline size_t ggml_hexagon_tiled_row_size(enum ggml_type type, int64_t ne
     if (type == GGML_TYPE_IQ3_XXS) {
         return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS / 32);
     }
+    if (type == GGML_TYPE_IQ3_S) {
+        return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ3_S / 32);
+    }
     if (type == GGML_TYPE_IQ4_XS) {
         // eight tiles per superblock: 8 * 576 / 32 = 144 bytes per row,
         // versus 136 raw bytes. Using ggml_row_size here would underallocate.
@@ -320,7 +326,7 @@ static inline size_t ggml_hexagon_tiled_row_size(enum ggml_type type, int64_t ne
 }
 
 static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
-    if (type == GGML_TYPE_IQ3_XXS) {
+    if (type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S) {
         return false;
     }
     // IQ4_XS tile-scale safety is not HMX fp16-dequant safety: HMX computes
@@ -2717,6 +2723,58 @@ static bool ggml_hexagon_iq3xxs_readback(const ggml_tensor * t, void * data, siz
     return true;
 }
 
+static void repack_iq3s_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
+    GGML_ASSERT(offset == 0);
+    GGML_ASSERT(size >= ggml_nbytes(t));
+    GGML_ASSERT(t->ne[0] % QK_K == 0);
+
+    const int64_t ne0 = t->ne[0];
+    const int64_t ne1 = t->ne[1];
+    const int64_t slices = t->ne[2] * t->ne[3];
+    const size_t raw_slice_size = ggml_hexagon_iq3s::original_size_2d(ne0, ne1);
+    const size_t tiled_slice_size = ggml_hexagon_iq3s::repacked_size_2d(ne0, ne1);
+    GGML_ASSERT(raw_slice_size == (size_t) ne1 * ggml_row_size(t->type, ne0));
+
+    const uint8_t * src = (const uint8_t *) data;
+    uint8_t * dst = (uint8_t *) t->data;
+    for (int64_t slice = 0; slice < slices; ++slice) {
+        const bool ok = ggml_hexagon_iq3s::repack_2d(
+            (const block_iq3_s *) (src + (size_t) slice * raw_slice_size), raw_slice_size,
+            ne0, ne1, dst + (size_t) slice * tiled_slice_size, tiled_slice_size);
+        GGML_ASSERT(ok);
+    }
+}
+
+static bool ggml_hexagon_iq3s_readback(const ggml_tensor * t, void * data, size_t offset, size_t size) {
+    if (t->view_src || t->ne[0] % QK_K != 0 || offset > ggml_nbytes(t) || size > ggml_nbytes(t) - offset) {
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+    const size_t raw_slice_size = ggml_hexagon_iq3s::original_size_2d(t->ne[0], t->ne[1]);
+    const size_t tiled_slice_size = ggml_hexagon_iq3s::repacked_size_2d(t->ne[0], t->ne[1]);
+    if (raw_slice_size == 0 || tiled_slice_size == 0) {
+        return false;
+    }
+    const uint8_t * src = (const uint8_t *) t->data;
+    size_t done = 0;
+    while (done < size) {
+        const size_t pos = offset + done;
+        const size_t slice = pos / raw_slice_size;
+        const size_t slice_offset = pos % raw_slice_size;
+        const size_t slice_tail = raw_slice_size - slice_offset;
+        const size_t chunk = size - done < slice_tail ? size - done : slice_tail;
+        if (!ggml_hexagon_iq3s::readback_2d(src + slice * tiled_slice_size, tiled_slice_size,
+                                           t->ne[0], t->ne[1], slice_offset,
+                                           (uint8_t *) data + done, chunk)) {
+            return false;
+        }
+        done += chunk;
+    }
+    return true;
+}
+
 // ** IQ4_XS production preparation and readback
 //
 // The tile is the IQ4_NL one (576 B: 512 B quant plane + 64 B fp16 scale plane),
@@ -2814,6 +2872,10 @@ static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t 
 
         case GGML_TYPE_IQ3_XXS:
             repack_iq3xxs_tiled(tensor, data, 0, size);
+            break;
+
+        case GGML_TYPE_IQ3_S:
+            repack_iq3s_tiled(tensor, data, 0, size);
             break;
 
         case GGML_TYPE_Q3_K:
@@ -2921,6 +2983,13 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
     if (tensor->type == GGML_TYPE_IQ3_XXS && (extra->flags & GGML_HEXAGON_TENSOR_REPACK)) {
         if (!ggml_hexagon_iq3xxs_readback(tensor, data, offset, size)) {
             GGML_LOG_ERROR("ggml-hex: %s cannot read IQ3_XXS tensor %s\n", sess->c_name(), tensor->name);
+        }
+        return;
+    }
+
+    if (tensor->type == GGML_TYPE_IQ3_S && (extra->flags & GGML_HEXAGON_TENSOR_REPACK)) {
+        if (!ggml_hexagon_iq3s_readback(tensor, data, offset, size)) {
+            GGML_LOG_ERROR("ggml-hex: %s cannot read IQ3_S tensor %s\n", sess->c_name(), tensor->name);
         }
         return;
     }
@@ -3120,6 +3189,17 @@ static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buff
             if (!ggml_hexagon_iq3xxs_readback(tensor, (uint8_t *) data + i * stride_data,
                                               offset + i * stride_tensor, size)) {
                 GGML_LOG_ERROR("ggml-hex: %s cannot read IQ3_XXS 2d tensor %s\n", sess->c_name(), tensor->name);
+                return;
+            }
+        }
+        return;
+    }
+
+    if (tensor->type == GGML_TYPE_IQ3_S && (extra->flags & GGML_HEXAGON_TENSOR_REPACK)) {
+        for (size_t i = 0; i < n_copies; ++i) {
+            if (!ggml_hexagon_iq3s_readback(tensor, (uint8_t *) data + i * stride_data,
+                                            offset + i * stride_tensor, size)) {
+                GGML_LOG_ERROR("ggml-hex: %s cannot read IQ3_S 2d tensor %s\n", sess->c_name(), tensor->name);
                 return;
             }
         }
@@ -3643,6 +3723,14 @@ struct ggml_hexagon_opbatch {
                 }
             }
         }
+        if (opt_iq3s_gather) {
+            for (const auto * in : node.get_inputs()) {
+                if (in && in->type == GGML_TYPE_IQ3_S) {
+                    o.flags |= HTP_OPFLAGS_IQ3S_GATHER;
+                    break;
+                }
+            }
+        }
 
         ggml_hexagon_dump_op_exec(sess->c_name(), ops[n], o.flags);
 
@@ -3965,8 +4053,8 @@ struct ggml_hexagon_opbatch {
         const ggml_tensor * src0 = last_node.src0();
         const ggml_tensor * src1 = last_node.src1();
 
-        // IQ3_XXS and IQ4_XS MUL_MAT+ADD fusion stays off until their paths are validated
-        if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ4_XS) return false;
+        // IQ3_XXS, IQ3_S, and IQ4_XS MUL_MAT+ADD fusion stays off until their paths are validated
+        if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S || src0->type == GGML_TYPE_IQ4_XS) return false;
 
         if (src2->type != GGML_TYPE_F32) return false;
 
@@ -5199,7 +5287,7 @@ void ggml_hexagon_session::allocate(const ggml_hexagon_device_config & config) n
     }
 
     // keep host kparams budgets in sync with the DSP-side IQ2_S codebook reserve
-    if (opt_iq2s_gather || opt_iq3xxs_gather) {
+    if (opt_iq2s_gather || opt_iq3xxs_gather || opt_iq3s_gather) {
         this->vtcm_size -= HTP_IQ2S_GRID_VTCM_RESERVE;
         GGML_LOG_INFO("ggml-hex: %s quantized gather: reserving %d KiB VTCM for codebooks\n",
                       this->c_name(), HTP_IQ2S_GRID_VTCM_RESERVE / 1024);
@@ -6780,6 +6868,7 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
         case GGML_TYPE_Q3_K:
         case GGML_TYPE_Q2_K:
             // IQ2_XS/IQ2_XXS unpack on HTP is slower than the CPU kernel when the gather path is off,
@@ -6794,6 +6883,9 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
             if (src0->type == GGML_TYPE_IQ3_XXS && src0->view_src) {
                 return false;
             }
+            if (src0->type == GGML_TYPE_IQ3_S && src0->view_src) {
+                return false;
+            }
 
             if (!ggml_is_contiguous(src0) || ggml_is_permuted(src0)) {
                 return false;
@@ -6802,7 +6894,7 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
             if (src0->ne[0] % ((src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q5_K || src0->type == GGML_TYPE_Q4_K ||
                                 src0->type == GGML_TYPE_Q3_K || src0->type == GGML_TYPE_Q2_K ||
                                 src0->type == GGML_TYPE_IQ2_S || src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS ||
-                                src0->type == GGML_TYPE_IQ3_XXS) ? QK_K : 32)) {
+                                src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S) ? QK_K : 32)) {
                 return false;
             }
 
@@ -7784,8 +7876,8 @@ static bool is_supported_mul_mat_nx_kernel(const ggml_tensor * src0, const struc
         return kparams->kernel_type == HTP_MM_KERNEL_HMX_2D;
     }
 
-    // IQ3_XXS and IQ4_XS only have validated direct HVX paths.
-    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ4_XS) return false;
+    // IQ3_XXS, IQ3_S, and IQ4_XS only have direct HVX paths.
+    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S || src0->type == GGML_TYPE_IQ4_XS) return false;
 
     if (!ggml_hexagon_is_repack_type(src0->type) || src0->type == GGML_TYPE_Q6_K) {
         return false;  // Q6_K has no fused HVX kernel
@@ -7799,7 +7891,7 @@ static bool is_supported_mul_mat_id_nx_kernel(const ggml_tensor * src0, const st
         return kparams->kernel_type == HTP_MM_KERNEL_HMX_2D;
     }
 
-    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ4_XS) return false;
+    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S || src0->type == GGML_TYPE_IQ4_XS) return false;
 
     if (!ggml_hexagon_is_repack_type(src0->type)) {
         return false;
@@ -7816,7 +7908,7 @@ static bool is_mergeable_mul_mat(const ggml_tensor * t) {
     if (src1->type != GGML_TYPE_F32) return false;
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
-    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ4_XS) return false;
+    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S || src0->type == GGML_TYPE_IQ4_XS) return false;
     if (src0->ne[2] != 1 || src0->ne[3] != 1) return false;
 
     if (mm_is_hmx_eligible(t)) {
@@ -7851,7 +7943,7 @@ static bool is_mergeable_mul_mat_id(const ggml_tensor * t) {
     const ggml_tensor * src0 = t->src[0];
     if (src0->type == GGML_TYPE_IQ2_S) return false;
     if (src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_XXS) return false;
-    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ4_XS) return false;
+    if (src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ3_S || src0->type == GGML_TYPE_IQ4_XS) return false;
     return ggml_hexagon_is_repack_type(src0->type);
 }
 
@@ -7927,8 +8019,9 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
             if (graph->nodes[i]->op == GGML_OP_RMS_NORM && ggml_can_fuse(graph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL })) {
                 extra->flags |= GGML_HEXAGON_TENSOR_FUSEABLE;
             } else if (graph->nodes[i]->op == GGML_OP_MUL_MAT || graph->nodes[i]->op == GGML_OP_MUL_MAT_ID) {
-                // IQ3_XXS and IQ4_XS direct MUL_MAT only: never tag them FUSEABLE
+                // IQ3_XXS, IQ3_S, and IQ4_XS direct MUL_MAT only: never tag them FUSEABLE
                 if (graph->nodes[i]->src[0] && (graph->nodes[i]->src[0]->type == GGML_TYPE_IQ3_XXS ||
+                                                 graph->nodes[i]->src[0]->type == GGML_TYPE_IQ3_S ||
                                                  graph->nodes[i]->src[0]->type == GGML_TYPE_IQ4_XS)) continue;
                 if ((i + 1 < graph->n_nodes && graph->nodes[i + 1]->op == GGML_OP_ADD && ggml_can_fuse(graph, i, { graph->nodes[i]->op, GGML_OP_ADD })) ||
                     ggml_node_has_n_uses(graph, i, 1)) {
@@ -8355,6 +8448,7 @@ static bool ggml_backend_hexagon_cpy_tensor_async(ggml_backend_t backend_src, gg
     // bytes. This path only copies flags and enqueues a device copy, which would
     // silently drop them, so fall back to the get/set copy instead.
     if (src->type == GGML_TYPE_IQ3_XXS || dst->type == GGML_TYPE_IQ3_XXS ||
+        src->type == GGML_TYPE_IQ3_S || dst->type == GGML_TYPE_IQ3_S ||
         src->type == GGML_TYPE_IQ4_XS || dst->type == GGML_TYPE_IQ4_XS) {
         return false;
     }
@@ -9346,6 +9440,16 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_IQ3_XXS == (unsigned int) GGML_TYPE_IQ3_XXS,
                   "please update hexagon_type to match ggml_type");
+    static_assert((unsigned int) HTP_TYPE_IQ3_S == (unsigned int) GGML_TYPE_IQ3_S,
+                  "please update hexagon_type to match ggml_type");
+    static_assert(HTP_MM_WEIGHT_TILE_SIZE_IQ3_S == ggml_hexagon_iq3s::TILE_SIZE,
+                  "IQ3_S host/DSP tile size mismatch");
+    static_assert(HTP_IQ3S_INDEX_PLANE_OFFSET == ggml_hexagon_iq3s::INDEX_PLANE_OFFSET &&
+                  HTP_IQ3S_SIGN_PLANE_OFFSET == ggml_hexagon_iq3s::SIGN_PLANE_OFFSET &&
+                  HTP_IQ3S_QH_PLANE_OFFSET == ggml_hexagon_iq3s::QH_PLANE_OFFSET &&
+                  HTP_IQ3S_SCALE_PLANE_OFFSET == ggml_hexagon_iq3s::SCALE_PLANE_OFFSET &&
+                  HTP_IQ3S_D_PLANE_OFFSET == ggml_hexagon_iq3s::D_PLANE_OFFSET,
+                  "IQ3_S host/DSP planes mismatch");
     static_assert((unsigned int) HTP_TYPE_IQ2_XS == (unsigned int) GGML_TYPE_IQ2_XS,
                   "please update hexagon_type to match ggml_type");
     static_assert((unsigned int) HTP_TYPE_IQ4_XS == (unsigned int) GGML_TYPE_IQ4_XS,
@@ -9379,6 +9483,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     const char * str_dma64    = getenv("GGML_HEXAGON_DMA64");
     const char * str_iq2s_gather = getenv("GGML_HEXAGON_IQ2S_GATHER");
     const char * str_iq3xxs_gather = getenv("GGML_HEXAGON_IQ3XXS_GATHER");
+    const char * str_iq3s_gather = getenv("GGML_HEXAGON_IQ3S_GATHER");
 
     // Init Arch first since it affects other defaults
     if (!str_arch) {
@@ -9431,6 +9536,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     opt_hostbuf   = str_hostbuf  ? atoi(str_hostbuf) != 0                 : opt_hostbuf;
     opt_iq2s_gather = str_iq2s_gather ? atoi(str_iq2s_gather) != 0         : opt_iq2s_gather;
     opt_iq3xxs_gather = str_iq3xxs_gather ? atoi(str_iq3xxs_gather) != 0   : opt_iq3xxs_gather;
+    opt_iq3s_gather = str_iq3s_gather ? atoi(str_iq3s_gather) != 0         : opt_iq3s_gather;
 
     // Parse device configuration
     const char * str_devices  = getenv("GGML_HEXAGON_DEVICES");

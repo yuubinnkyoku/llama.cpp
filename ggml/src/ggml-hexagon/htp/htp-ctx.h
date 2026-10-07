@@ -122,6 +122,10 @@ struct htp_context {
     const uint8_t *        iq3xxs_signs;
     uint8_t *              iq3xxs_scratch_base;
 
+    bool                   iq3s_grid_ready;
+    const uint32_t *       iq3s_grid;
+    uint8_t *              iq3s_scratch_base;
+
     uint64_t               max_vmem;
     struct htp_dirty_range dirty_ranges[HTP_MAX_DIRTY_RANGES];
 
@@ -196,5 +200,7 @@ void htp_iq2s_grid_ensure(struct htp_context * ctx);
 void htp_iq2s_grid_refresh(struct htp_context * ctx);
 bool htp_iq3xxs_grid_ensure(struct htp_context * ctx);
 void htp_iq3xxs_grid_refresh(struct htp_context * ctx);
+bool htp_iq3s_grid_ensure(struct htp_context * ctx);
+void htp_iq3s_grid_refresh(struct htp_context * ctx);
 
 #endif /* HTP_CTX_H */

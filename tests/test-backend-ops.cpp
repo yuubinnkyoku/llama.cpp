@@ -10558,6 +10558,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+
+    // IQ3_S uses the same direct-HVX tile dimensions with separate sign, high-index, and scale planes.
+    for (int64_t k : {256, 512, 768, 1024, 4096}) {
+        for (int64_t m : {31, 32, 33}) {
+            for (int64_t n : {1, 2}) {
+                test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32,
+                                                         m, n, k, {1, 1}, {1, 1}));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, 33, 1, 1024, {2, 3}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_S, GGML_TYPE_F32, 33, 10, 1024, {2, 3}, {1, 1}));
 #else
     // m = a rows
     // n = b rows

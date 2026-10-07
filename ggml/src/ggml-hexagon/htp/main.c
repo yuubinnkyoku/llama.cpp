@@ -300,6 +300,7 @@ static void vtcm_acquire(struct htp_context * ctx) {
         // VTCM contents are lost on release; restore any placed codebooks.
         htp_iq2s_grid_refresh(ctx);
         htp_iq3xxs_grid_refresh(ctx);
+        htp_iq3s_grid_refresh(ctx);
 
         // Drop the priority to make sure we get the release callback from other GGML-HTP and QNN-HTP sessions
         HAP_compute_res_update_priority(ctx->vtcm_rctx, ctx->thread_prio + 10);

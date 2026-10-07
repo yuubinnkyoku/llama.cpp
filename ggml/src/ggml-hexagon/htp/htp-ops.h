@@ -31,6 +31,7 @@ enum htp_data_type {
     HTP_TYPE_IQ2_XS  = 17,
     HTP_TYPE_IQ3_XXS = 18,
     HTP_TYPE_IQ4_NL = 20,
+    HTP_TYPE_IQ3_S   = 21,
     HTP_TYPE_IQ2_S  = 22,
     HTP_TYPE_IQ4_XS = 23,
     HTP_TYPE_I32    = 26,
@@ -174,9 +175,10 @@ enum htp_op_flags {
     HTP_OPFLAGS_STUB        = (1U << 0),
     HTP_OPFLAGS_IQ2S_GATHER = (1U << 1),
     HTP_OPFLAGS_IQ3XXS_GATHER = (1U << 2),
+    HTP_OPFLAGS_IQ3S_GATHER = (1U << 3),
 };
 
-// top-of-VTCM region shared by the IQ2 and IQ3_XXS codebooks and gather scratch
+// top-of-VTCM region shared by the IQ2, IQ3_XXS, and IQ3_S codebooks and gather scratch
 #define HTP_IQ2S_GRID_VTCM_RESERVE (128 * 1024)
 
 // Op descriptor
