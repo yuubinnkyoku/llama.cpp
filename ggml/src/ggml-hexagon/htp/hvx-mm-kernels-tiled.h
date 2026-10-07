@@ -1076,6 +1076,105 @@ static void tiled_vec_dot_iq2f_32x2(const uint32_t n, float * restrict s0, float
     }
 }
 
+static void tiled_vec_dot_iq3_xxs_scalar_32x1(const uint32_t n, float * restrict s,
+        const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz,
+        const uint32_t * restrict grid, const uint8_t * restrict signs) {
+    const uint8_t * weights = vx;
+    const uint8_t * activation = vy;
+    for (uint32_t row = 0; row < valid_rows; ++row) {
+        float sum = 0.0f;
+        for (uint32_t kt = 0; kt < n / 32; ++kt) {
+            const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+            const int8_t * act = (const int8_t *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+            uint32_t aux;
+            __fp16 d, da;
+            memcpy(&aux, tile + 256 + 4 * row, sizeof(aux));
+            memcpy(&d, tile + 384 + 2 * row, sizeof(d));
+            memcpy(&da, act + 1024, sizeof(da));
+            const float db = (float) d * (0.5f + (aux >> 28)) * 0.5f;
+            int32_t dot = 0;
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t sign = signs[(aux >> (7 * l)) & 127];
+                for (int j = 0; j < 8; ++j) {
+                    const uint32_t entry = grid[tile[(2 * l + j / 4) * 32 + row]];
+                    const int magnitude = (entry >> (8 * (j % 4))) & 255;
+                    const int weight = (sign & (1u << j)) ? -magnitude : magnitude;
+                    dot += weight * act[(2 * l + j / 4) * 128 + j % 4];
+                }
+            }
+            sum += (float) dot * db * (float) da;
+        }
+        s[row] = sum + (sz ? sz[row] : 0.0f);
+    }
+}
+
+static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, HVX_Vector aux, int l,
+        const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
+    const HVX_Vector idx0 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l)))));
+    const HVX_Vector idx1 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l + 32)))));
+    const HVX_Vector sign_index = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(aux, 7 * l), Q6_V_vsplat_R(127));
+    const HVX_Vector sign_offset = Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(124));
+
+    Q6_vgather_ARMVw(&scratch[0], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx0, 2));
+    Q6_vgather_ARMVw(&scratch[1], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx1, 2));
+    Q6_vgather_ARMVw(&scratch[2], (uint32_t) (uintptr_t) signs, 127, sign_offset);
+
+    HVX_Vector shift = Q6_Vw_vasl_VwR(Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(3)), 3);
+    HVX_Vector sign = Q6_V_vand_VV(Q6_Vw_vlsr_VwVw(scratch[2], shift), Q6_V_vsplat_R(255));
+    sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 8));
+    sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 16));
+    const HVX_VectorPred neg0 = Q6_Q_vcmp_gt_VubVub(Q6_V_vand_VV(sign, Q6_V_vsplat_R(0x08040201)), Q6_V_vzero());
+    const HVX_VectorPred neg1 = Q6_Q_vcmp_gt_VubVub(Q6_V_vand_VV(sign, Q6_V_vsplat_R(0x80402010)), Q6_V_vzero());
+    const HVX_Vector w0 = Q6_V_vmux_QVV(neg0, Q6_Vb_vsub_VbVb(Q6_V_vzero(), scratch[0]), scratch[0]);
+    const HVX_Vector w1 = Q6_V_vmux_QVV(neg1, Q6_Vb_vsub_VbVb(Q6_V_vzero(), scratch[1]), scratch[1]);
+    return Q6_W_vcombine_VV(w1, w0);
+}
+
+static inline HVX_Vector iq3_xxs_scale_vector(const uint8_t * tile, HVX_Vector aux, HVX_Vector activation_scale) {
+    const HVX_Vector scale = Q6_Vsf_equals_Vw(Q6_Vuw_vlsr_VuwR(aux, 28));
+    const HVX_Vector half = hvx_vec_splat_f32(0.5f);
+    const HVX_Vector factor = hvx_vec_mul_f32_f32(hvx_vec_add_f32_f32(scale, half), half);
+    const HVX_Vector base = hvx_vec_mul_f16_f16_to_f32_lower32(hvx_vmemu(tile + 384), activation_scale);
+    return hvx_vec_mul_f32_f32(base, factor);
+}
+
+static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, const void * restrict vx,
+        const void * restrict vy, uint32_t valid_rows, const float * restrict sz,
+        const uint32_t * restrict grid, const uint8_t * restrict signs, HVX_Vector * restrict scratch) {
+    if (!scratch) {
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s, vx, vy, valid_rows, sz, grid, signs);
+        return;
+    }
+    const uint8_t * weights = vx;
+    const uint8_t * activation = vy;
+    HVX_Vector sum = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+        const HVX_Vector * act = (const HVX_Vector *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector aux = hvx_vmemu(tile + 256);
+        HVX_Vector dot = Q6_V_vzero();
+        for (int l = 0; l < 4; ++l) {
+            const HVX_VectorPair w = iq3_xxs_unpack_group_gather(tile, aux, l, grid, signs, scratch);
+            dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_lo_W(w), act[2 * l]);
+            dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_hi_W(w), act[2 * l + 1]);
+        }
+        sum = hvx_vec_add_f32_f32(sum,
+            hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot), iq3_xxs_scale_vector(tile, aux, act[8])));
+    }
+    if (sz) {
+        sum = hvx_vec_add_f32_f32(sum, hvx_vmemu(sz));
+    }
+    hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
+}
+
+static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, float * restrict s1,
+        const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows,
+        const float * restrict sz0, const float * restrict sz1, const uint32_t * restrict grid,
+        const uint8_t * restrict signs, HVX_Vector * restrict scratch) {
+    tiled_vec_dot_iq3_xxs_32x1(n, s0, vx, vy0, valid_rows, sz0, grid, signs, scratch);
+    tiled_vec_dot_iq3_xxs_32x1(n, s1, vx, vy1, valid_rows, sz1, grid, signs, scratch);
+}
+
 // Q3_K / Q2_K: low 2 bits of k-group g, see HTP_MM_WEIGHT_TILE_SIZE_Q3_K
 static inline HVX_Vector unpack_q3_k_low2(const HVX_Vector * restrict vptr, int g, HVX_Vector mask_03) {
     HVX_Vector v = vptr[g >> 2];

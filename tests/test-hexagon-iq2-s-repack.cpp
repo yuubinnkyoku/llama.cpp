@@ -5,6 +5,7 @@
 #include "ggml-cpu.h"
 #include "ggml-hexagon/iq2-s-repack.h"
 #include "ggml-hexagon/iq2-family-repack.h"
+#include "ggml-hexagon/iq3-xxs-repack.h"
 #include "ggml-hexagon/iq4-xs-repack.h"
 #include "ggml-hexagon/iq4-xs-alloc.h"
 
@@ -1733,7 +1734,122 @@ check(ok.meta_slice_size == (512 / QK_K) * 33 * sizeof(iq4xs::block_metadata),
     std::printf("IQ4_XS production H: K gate, sidecar sizing, non-finite and uninitialized rejection PASS\n");
 }
 
+namespace iq3xxs = ggml_hexagon_iq3xxs;
+
+static void test_iq3xxs_sizes() {
+    check(iq3xxs::original_size_2d(256, 32) == 32u * sizeof(block_iq3_xxs),
+          "IQ3_XXS original size for 32x256");
+    check(iq3xxs::repacked_size_2d(256, 31) == 8u * iq3xxs::TILE_SIZE,
+          "IQ3_XXS 31-row tile size");
+    check(iq3xxs::repacked_size_2d(256, 32) == 8u * iq3xxs::TILE_SIZE,
+          "IQ3_XXS 32-row tile size");
+    check(iq3xxs::repacked_size_2d(256, 33) == 16u * iq3xxs::TILE_SIZE,
+          "IQ3_XXS 33-row tile padding");
+    check(iq3xxs::repacked_size_2d(512, 32) == 16u * iq3xxs::TILE_SIZE,
+          "IQ3_XXS two superblocks per row");
+    check(!iq3xxs::valid_2d_shape(255, 32), "IQ3_XXS rejects a partial superblock");
+    check(iq3xxs::original_size_2d(INT64_MAX - 255, INT64_MAX) == 0,
+          "IQ3_XXS rejects overflowing dimensions");
+}
+
+static void test_iq3xxs_raw_roundtrip(int64_t ne0, int64_t ne1) {
+    const size_t original_size = iq3xxs::original_size_2d(ne0, ne1);
+    const size_t packed_size = iq3xxs::repacked_size_2d(ne0, ne1);
+    std::vector<block_iq3_xxs> original(original_size / sizeof(block_iq3_xxs));
+    std::vector<block_iq3_xxs> roundtrip(original.size());
+    std::vector<uint8_t> packed(packed_size);
+    uint32_t rng = 0x85ebca6bu ^ (uint32_t) ne0 ^ ((uint32_t) ne1 << 16);
+    uint8_t * raw = reinterpret_cast<uint8_t *>(original.data());
+    for (size_t i = 0; i < original_size; ++i) {
+        raw[i] = (uint8_t) xorshift32(rng);
+    }
+
+    check(iq3xxs::repack_2d(original.data(), original_size, ne0, ne1, packed.data(), packed.size()),
+          "IQ3_XXS raw repack succeeds");
+    check(iq3xxs::unpack_2d(packed.data(), packed.size(), ne0, ne1, roundtrip.data(), original_size),
+          "IQ3_XXS raw unpack succeeds");
+    check(std::memcmp(original.data(), roundtrip.data(), original_size) == 0,
+          "IQ3_XXS raw bytes survive repack and unpack exactly");
+
+    std::vector<uint8_t> range(127);
+    check(iq3xxs::readback_2d(packed.data(), packed.size(), ne0, ne1, 81, range.data(), range.size()),
+          "IQ3_XXS partial byte-range readback succeeds");
+    check(std::memcmp(range.data(), raw + 81, range.size()) == 0,
+          "IQ3_XXS partial byte-range readback is exact");
+
+    if (ne1 >= 33) {
+        std::vector<block_iq3_xxs> rows((size_t) 2 * (size_t) (ne0 / QK_K));
+        check(iq3xxs::unpack_rows_2d(packed.data(), packed.size(), ne0, ne1, 31, 2,
+                                     rows.data(), rows.size() * sizeof(block_iq3_xxs)),
+              "IQ3_XXS row-boundary readback succeeds");
+        check(std::memcmp(rows.data(), original.data() + 31 * (ne0 / QK_K),
+                          rows.size() * sizeof(block_iq3_xxs)) == 0,
+              "IQ3_XXS row-boundary readback is exact");
+    }
+}
+
+static void test_iq3xxs_quantized_reference() {
+    const int64_t ne0 = 512;
+    const int64_t ne1 = 33;
+    const size_t raw_size = iq3xxs::original_size_2d(ne0, ne1);
+    const size_t packed_size = iq3xxs::repacked_size_2d(ne0, ne1);
+    std::vector<float> source((size_t) ne0 * (size_t) ne1);
+    std::vector<float> imatrix(source.size(), 1.0f);
+    std::vector<block_iq3_xxs> quantized(raw_size / sizeof(block_iq3_xxs));
+    std::vector<block_iq3_xxs> roundtrip(quantized.size());
+    std::vector<uint8_t> packed(packed_size);
+    fill_source(source, ne0, ne1);
+
+    check(ggml_quantize_chunk(GGML_TYPE_IQ3_XXS, source.data(), quantized.data(), 0, ne1, ne0,
+                              imatrix.data()) == raw_size,
+          "IQ3_XXS quantizer writes expected bytes");
+    check(iq3xxs::repack_2d(quantized.data(), raw_size, ne0, ne1, packed.data(), packed.size()),
+          "IQ3_XXS quantized repack succeeds");
+    check(iq3xxs::unpack_2d(packed.data(), packed.size(), ne0, ne1, roundtrip.data(), raw_size),
+          "IQ3_XXS quantized unpack succeeds");
+    check(std::memcmp(quantized.data(), roundtrip.data(), raw_size) == 0,
+          "IQ3_XXS quantized bytes survive repack and unpack exactly");
+
+    std::vector<float> cpu(ne0);
+    std::vector<float> tiled(ne0);
+    const size_t matrix_size = packed_size;
+    for (int64_t row = 0; row < ne1; ++row) {
+        dequantize_row_iq3_xxs(quantized.data() + row * (ne0 / QK_K), cpu.data(), ne0);
+        iq3xxs::semantic_dequantize_row(packed.data(), tiled.data(), ne0, row, iq3xxs_grid, ksigns_iq2xs);
+        for (int64_t k = 0; k < ne0; ++k) {
+            check(std::fabs(cpu[k] - tiled[k]) <= 1e-6f * std::max(1.0f, std::fabs(cpu[k])),
+                  "IQ3_XXS tiled scalar dequant matches CPU reference");
+        }
+    }
+    check(matrix_size == iq3xxs::repacked_size_2d(ne0, ne1), "IQ3_XXS reference covers padded rows");
+}
+
+static void test_iq3xxs_duplicate_d_validation() {
+    const int64_t ne0 = 256;
+    const int64_t ne1 = 1;
+    std::vector<block_iq3_xxs> raw(1);
+    std::memset(raw.data(), 0x5a, sizeof(block_iq3_xxs));
+    std::vector<uint8_t> packed(iq3xxs::repacked_size_2d(ne0, ne1));
+    check(iq3xxs::repack_2d(raw.data(), sizeof(block_iq3_xxs), ne0, ne1, packed.data(), packed.size()),
+          "IQ3_XXS duplicate-d fixture repack succeeds");
+    packed[iq3xxs::TILE_SIZE + iq3xxs::D_PLANE_OFFSET] ^= 1;
+    std::vector<block_iq3_xxs> roundtrip(1);
+    check(!iq3xxs::unpack_2d(packed.data(), packed.size(), ne0, ne1, roundtrip.data(), sizeof(block_iq3_xxs)),
+          "IQ3_XXS unpack rejects inconsistent duplicated d");
+    uint8_t byte = 0;
+    check(!iq3xxs::readback_2d(packed.data(), packed.size(), ne0, ne1, 0, &byte, 1),
+          "IQ3_XXS readback rejects inconsistent duplicated d");
+}
+
 int main() {
+    test_iq3xxs_sizes();
+    for (const auto & shape : std::vector<std::pair<int64_t, int64_t>> {
+            {256, 31}, {256, 32}, {256, 33}, {512, 33}, {1024, 33},
+        }) {
+        test_iq3xxs_raw_roundtrip(shape.first, shape.second);
+    }
+    test_iq3xxs_quantized_reference();
+    test_iq3xxs_duplicate_d_validation();
     test_iq4xs_prod_safe_allocation();
     test_iq4xs_prod_overflow_allocation();
     test_iq4xs_prod_exact_readback();

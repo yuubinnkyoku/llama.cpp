@@ -29,6 +29,7 @@ enum htp_data_type {
     HTP_TYPE_Q6_K   = 14,
     HTP_TYPE_IQ2_XXS = 16,
     HTP_TYPE_IQ2_XS  = 17,
+    HTP_TYPE_IQ3_XXS = 18,
     HTP_TYPE_IQ4_NL = 20,
     HTP_TYPE_IQ2_S  = 22,
     HTP_TYPE_IQ4_XS = 23,
@@ -172,9 +173,10 @@ struct htp_buf_desc {
 enum htp_op_flags {
     HTP_OPFLAGS_STUB        = (1U << 0),
     HTP_OPFLAGS_IQ2S_GATHER = (1U << 1),
+    HTP_OPFLAGS_IQ3XXS_GATHER = (1U << 2),
 };
 
-// top-of-VTCM region reserved for the IQ2_S codebook (iq2s_grid + sign LUT)
+// top-of-VTCM region shared by the IQ2 and IQ3_XXS codebooks and gather scratch
 #define HTP_IQ2S_GRID_VTCM_RESERVE (128 * 1024)
 
 // Op descriptor
