@@ -306,7 +306,8 @@ static inline size_t ggml_hexagon_tiled_row_size(enum ggml_type type, int64_t ne
         return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ2_F / 32);
     }
     if (type == GGML_TYPE_IQ3_XXS) {
-        return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS / 32);
+        const size_t row_tile_bytes = ggml_hexagon_iq3xxs::row_tile_size(ne0);
+        return row_tile_bytes ? row_tile_bytes / ggml_hexagon_iq3xxs::TILE_ROWS : 0;
     }
     if (type == GGML_TYPE_IQ3_S) {
         return (size_t) (ne0 / 32) * (HTP_MM_WEIGHT_TILE_SIZE_IQ3_S / 32);

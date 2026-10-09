@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ggml-quants.h"
+#include "iq3-compact-layout.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,21 +12,22 @@ namespace ggml_hexagon_iq3xxs {
 
 static_assert(QK_K == 256, "IQ3_XXS requires 256 weights per superblock");
 static_assert(sizeof(block_iq3_xxs) == 98, "IQ3_XXS source block layout changed");
+static_assert(IQ3XXS_COMPACT_PAIR_SIZE == 6272 && IQ3XXS_COMPACT_PAIR_SIZE % IQ3_COMPACT_ALIGNMENT == 0,
+              "IQ3_XXS pair supertile layout changed");
+static_assert(IQ3XXS_COMPACT_TAIL_SIZE == 3200 && IQ3XXS_COMPACT_TAIL_SIZE % IQ3_COMPACT_ALIGNMENT == 0,
+              "IQ3_XXS tail supertile layout changed");
 
-static constexpr int64_t TILE_ROWS = 32;
-static constexpr int64_t TILE_COLS = 32;
-static constexpr int64_t GROUPS_PER_SUPERBLOCK = 8;
+static constexpr int64_t TILE_ROWS = IQ3_COMPACT_TILE_ROWS;
+static constexpr int64_t TILE_COLS = IQ3_COMPACT_TILE_COLS;
+static constexpr int64_t GROUPS_PER_SUPERBLOCK = IQ3_COMPACT_GROUPS_PER_SUPERBLOCK;
 static constexpr size_t INDEX_PLANE_OFFSET = 0;
 static constexpr size_t AUX_PLANE_OFFSET = 256;
-static constexpr size_t D_PLANE_OFFSET = 384;
-static constexpr size_t PADDING_OFFSET = 448;
-static constexpr size_t TILE_SIZE = 512;
+static constexpr size_t DATA_TILE_SIZE = IQ3_COMPACT_DATA_TILE_SIZE;
+static constexpr size_t TILE_SIZE = DATA_TILE_SIZE;
+static constexpr size_t PAIR_SIZE = IQ3XXS_COMPACT_PAIR_SIZE;
+static constexpr size_t TAIL_SIZE = IQ3XXS_COMPACT_TAIL_SIZE;
 
-static_assert(TILE_SIZE % 128 == 0, "IQ3_XXS tile size and alignment");
 static_assert(AUX_PLANE_OFFSET == 8 * TILE_ROWS, "IQ3_XXS index plane");
-static_assert(D_PLANE_OFFSET == AUX_PLANE_OFFSET + 4 * TILE_ROWS, "IQ3_XXS aux plane");
-static_assert(PADDING_OFFSET == D_PLANE_OFFSET + sizeof(ggml_half) * TILE_ROWS && PADDING_OFFSET + 64 == TILE_SIZE,
-              "IQ3_XXS d and padding planes");
 
 inline bool valid_2d_shape(int64_t ne0, int64_t ne1) {
     return ne0 > 0 && ne0 % QK_K == 0 && ne1 >= 0 && ne1 <= INT64_MAX - (TILE_ROWS - 1);
@@ -51,21 +53,21 @@ inline size_t original_size_2d(int64_t ne0, int64_t ne1) {
     return (size_t) ne1 * row_size;
 }
 
+inline size_t row_tile_size(int64_t ne0) {
+    size_t bytes = 0;
+    return iq3_compact_xxs_row_tile_size(ne0, &bytes) ? bytes : 0;
+}
+
 inline size_t repacked_size_2d(int64_t ne0, int64_t ne1) {
     if (!valid_2d_shape(ne0, ne1)) {
         return 0;
     }
-    const uint64_t k_tiles = (uint64_t) (ne0 / TILE_COLS);
-    const size_t limit = std::numeric_limits<size_t>::max();
-    if (k_tiles > limit / TILE_SIZE) {
-        return 0;
-    }
-    const size_t tiled_row_size = (size_t) k_tiles * TILE_SIZE;
-    const uint64_t row_tiles = (uint64_t) (padded_rows(ne1) / TILE_ROWS);
-    if (row_tiles > limit / tiled_row_size) {
-        return 0;
-    }
-    return (size_t) row_tiles * tiled_row_size;
+    size_t bytes = 0;
+    return iq3_compact_xxs_total_size(ne0, ne1, 1, 1, &bytes) ? bytes : 0;
+}
+
+inline bool tile_offsets(int64_t ne0, uint64_t kt, iq3_compact_offsets & offsets) {
+    return iq3_compact_xxs_offsets(ne0, kt, &offsets) != 0;
 }
 
 inline bool repack_2d(const block_iq3_xxs * src, size_t src_size, int64_t ne0, int64_t ne1,
@@ -82,19 +84,28 @@ inline bool repack_2d(const block_iq3_xxs * src, size_t src_size, int64_t ne0, i
         return false;
     }
     std::memset(dst, 0, packed);
-    const int64_t k_tiles = ne0 / TILE_COLS;
-    const int64_t blocks_per_row = ne0 / QK_K;
+    const uint64_t k_tiles = (uint64_t) ne0 / TILE_COLS;
+    const uint64_t blocks_per_row = (uint64_t) ne0 / QK_K;
+    const size_t row_tile_bytes = row_tile_size(ne0);
     for (int64_t r = 0; r < ne1; ++r) {
-        for (int64_t kt = 0; kt < k_tiles; ++kt) {
-            const block_iq3_xxs & b = src[r * blocks_per_row + kt / GROUPS_PER_SUPERBLOCK];
-            const int group = (int) (kt % GROUPS_PER_SUPERBLOCK);
-            const size_t row = (size_t) (r % TILE_ROWS);
-            uint8_t * tile = dst + ((size_t) (r / TILE_ROWS) * (size_t) k_tiles + (size_t) kt) * TILE_SIZE;
-            for (int i = 0; i < 8; ++i) {
-                tile[INDEX_PLANE_OFFSET + (size_t) i * TILE_ROWS + row] = b.qs[8 * group + i];
+        const size_t tile_row = (size_t) r % TILE_ROWS;
+        uint8_t * row_tile_base = dst + (size_t) (r / TILE_ROWS) * row_tile_bytes;
+        const block_iq3_xxs * row_src = src + (size_t) r * (size_t) blocks_per_row;
+        for (uint64_t kt = 0; kt < k_tiles; ++kt) {
+            iq3_compact_offsets offsets;
+            if (!tile_offsets(ne0, kt, offsets)) {
+                return false;
             }
-            std::memcpy(tile + AUX_PLANE_OFFSET + 4 * row, b.qs + 64 + 4 * group, 4);
-            std::memcpy(tile + D_PLANE_OFFSET + 2 * row, &b.d, sizeof(b.d));
+            const block_iq3_xxs & b = row_src[kt / GROUPS_PER_SUPERBLOCK];
+            const int group = (int) offsets.group;
+            uint8_t * tile = row_tile_base + offsets.data_tile;
+            for (int i = 0; i < 8; ++i) {
+                tile[INDEX_PLANE_OFFSET + (size_t) i * TILE_ROWS + tile_row] = b.qs[8 * group + i];
+            }
+            std::memcpy(tile + AUX_PLANE_OFFSET + 4 * tile_row, b.qs + 64 + 4 * group, 4);
+            if (group == 0) {
+                std::memcpy(row_tile_base + offsets.d_plane + 2 * tile_row, &b.d, sizeof(b.d));
+            }
         }
     }
     return true;
@@ -107,22 +118,26 @@ inline bool reconstruct_block_2d(const uint8_t * src, size_t src_size, int64_t n
         sb < 0 || sb >= ne0 / QK_K) {
         return false;
     }
-    const int64_t k_tiles = ne0 / TILE_COLS;
-    const size_t tile_row = (size_t) (row % TILE_ROWS);
+    const size_t row_tile_bytes = row_tile_size(ne0);
+    const size_t tile_row = (size_t) row % TILE_ROWS;
+    const uint8_t * row_tile_base = src + (size_t) (row / TILE_ROWS) * row_tile_bytes;
     for (int group = 0; group < GROUPS_PER_SUPERBLOCK; ++group) {
-        const int64_t kt = sb * GROUPS_PER_SUPERBLOCK + group;
-        const uint8_t * tile = src + ((size_t) (row / TILE_ROWS) * (size_t) k_tiles + (size_t) kt) * TILE_SIZE;
-        const uint8_t * d = tile + D_PLANE_OFFSET + tile_row * sizeof(ggml_half);
-        if (group == 0) {
-            std::memcpy(&b.d, d, sizeof(b.d));
-        } else if (std::memcmp(&b.d, d, sizeof(b.d)) != 0) {
+        const uint64_t kt = (uint64_t) sb * GROUPS_PER_SUPERBLOCK + (uint64_t) group;
+        iq3_compact_offsets offsets;
+        if (!tile_offsets(ne0, kt, offsets)) {
             return false;
         }
+        const uint8_t * tile = row_tile_base + offsets.data_tile;
         for (int i = 0; i < 8; ++i) {
             b.qs[8 * group + i] = tile[INDEX_PLANE_OFFSET + (size_t) i * TILE_ROWS + tile_row];
         }
         std::memcpy(b.qs + 64 + 4 * group, tile + AUX_PLANE_OFFSET + 4 * tile_row, 4);
     }
+    iq3_compact_offsets first_offsets;
+    if (!tile_offsets(ne0, (uint64_t) sb * GROUPS_PER_SUPERBLOCK, first_offsets)) {
+        return false;
+    }
+    std::memcpy(&b.d, row_tile_base + first_offsets.d_plane + 2 * tile_row, sizeof(b.d));
     return true;
 }
 
@@ -191,11 +206,17 @@ inline uint32_t load_aux(const uint8_t * p) {
 
 inline void semantic_dequantize_row(const uint8_t * src, float * dst, int64_t k, int64_t row,
                                     const uint32_t * grid, const uint8_t * sign_table) {
-    for (int64_t kt = 0; kt < k / TILE_COLS; ++kt) {
-        const uint8_t * tile = src + ((size_t) (row / TILE_ROWS) * (size_t) (k / TILE_COLS) + (size_t) kt) * TILE_SIZE;
-        const size_t r = (size_t) (row % TILE_ROWS);
+    const size_t row_tile_bytes = row_tile_size(k);
+    const uint8_t * row_tile_base = src + (size_t) (row / TILE_ROWS) * row_tile_bytes;
+    for (uint64_t kt = 0; kt < (uint64_t) k / TILE_COLS; ++kt) {
+        iq3_compact_offsets offsets;
+        if (!tile_offsets(k, kt, offsets)) {
+            return;
+        }
+        const uint8_t * tile = row_tile_base + offsets.data_tile;
+        const size_t r = (size_t) row % TILE_ROWS;
         ggml_half d;
-        std::memcpy(&d, tile + D_PLANE_OFFSET + 2 * r, sizeof(d));
+        std::memcpy(&d, row_tile_base + offsets.d_plane + 2 * r, sizeof(d));
         const uint32_t aux = load_aux(tile + AUX_PLANE_OFFSET + 4 * r);
         const float db = ggml_fp16_to_fp32(d) * (0.5f + (aux >> 28)) * 0.5f;
         for (int l = 0; l < 4; ++l) {

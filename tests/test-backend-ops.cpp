@@ -10550,7 +10550,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     // IQ3_XXS is a direct-HVX path with a 32x32 tiled weight layout.
     // Cover its row boundaries, multiple superblocks, and both dot wrappers.
-    for (int64_t k : {256, 512, 768, 1024, 4096}) {
+    for (int64_t k : {256, 512, 768, 1024, 1280, 4096}) {
         for (int64_t m : {31, 32, 33}) {
             for (int64_t n : {1, 2}) {
                 test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32,

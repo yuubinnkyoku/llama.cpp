@@ -7,6 +7,7 @@
 #include "hex-fastdiv.h"
 #include "hex-common.h"
 #include "htp-vtcm.h"
+#include "../iq3-compact-layout.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -348,6 +349,11 @@ static inline size_t htp_mm_round_up(size_t n, size_t m) {
     return ((n + m - 1) / m) * m;
 }
 
+static inline size_t htp_mm_iq3_xxs_compact_row_tile_size(uint32_t ne0) {
+    size_t bytes = 0;
+    return iq3_compact_xxs_row_tile_size(ne0, &bytes) ? bytes : 0;
+}
+
 static inline bool htp_mm_hmx_pipeline(uint32_t m) {
     return m > 32;
 }
@@ -582,9 +588,15 @@ static inline void htp_mm_hvx_vtcm_layout_build(
         size_t weight_sz_per_thread = 0;
 
         if (is_repack) {
-            uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
-            uint32_t n_k_tiles = hex_round_up(ne10, 32) / 32;
-            uint32_t tile_row_size = n_k_tiles * aligned_tile_size;
+            size_t tile_row_size;
+            if (wtype == HTP_TYPE_IQ3_XXS) {
+                tile_row_size = htp_mm_iq3_xxs_compact_row_tile_size(ne10);
+                assert(tile_row_size > 0);
+            } else {
+                uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+                uint32_t n_k_tiles = hex_round_up(ne10, 32) / 32;
+                tile_row_size = n_k_tiles * aligned_tile_size;
+            }
 
             weight_sz_per_thread = hex_round_up(n_prefetch * tile_row_size, 128);
         } else {
@@ -610,9 +622,15 @@ static inline void htp_mm_hvx_vtcm_layout_build(
         src1_sz                   = htp_mm_round_up(src1_row_size_tiled * src1_nrows, 256);
 
         if (is_repack) {
-            const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
-            const uint32_t n_k_tiles         = ne10 / 32;
-            const uint32_t tile_row_size     = n_k_tiles * aligned_tile_size;
+            size_t tile_row_size;
+            if (wtype == HTP_TYPE_IQ3_XXS) {
+                tile_row_size = htp_mm_iq3_xxs_compact_row_tile_size(ne10);
+                assert(tile_row_size > 0);
+            } else {
+                const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+                const uint32_t n_k_tiles = ne10 / 32;
+                tile_row_size = n_k_tiles * aligned_tile_size;
+            }
             size_t repacked_vtcm_size        = htp_mm_round_up(n_prefetch * tile_row_size, 256);
             src0_sz_per_thread               = repacked_vtcm_size;
         }
@@ -655,9 +673,15 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                 src0_sz = src0_sz * n_threads;
 
                 if (is_repack) {
-                    uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
-                    uint32_t n_k_tiles = ne10 / 32;
-                    uint32_t tile_row_size = n_k_tiles * aligned_tile_size;
+                    size_t tile_row_size;
+                    if (wtype == HTP_TYPE_IQ3_XXS) {
+                        tile_row_size = htp_mm_iq3_xxs_compact_row_tile_size(ne10);
+                        assert(tile_row_size > 0);
+                    } else {
+                        uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+                        uint32_t n_k_tiles = ne10 / 32;
+                        tile_row_size = n_k_tiles * aligned_tile_size;
+                    }
                     size_t repacked_vtcm_size = htp_mm_round_up(n_prefetch * tile_row_size, 256);
                     src0_sz = repacked_vtcm_size * n_threads;
                 }

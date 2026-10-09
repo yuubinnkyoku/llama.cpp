@@ -1740,17 +1740,36 @@ namespace iq3xxs = ggml_hexagon_iq3xxs;
 static void test_iq3xxs_sizes() {
     check(iq3xxs::original_size_2d(256, 32) == 32u * sizeof(block_iq3_xxs),
           "IQ3_XXS original size for 32x256");
-    check(iq3xxs::repacked_size_2d(256, 31) == 8u * iq3xxs::TILE_SIZE,
-          "IQ3_XXS 31-row tile size");
-    check(iq3xxs::repacked_size_2d(256, 32) == 8u * iq3xxs::TILE_SIZE,
-          "IQ3_XXS 32-row tile size");
-    check(iq3xxs::repacked_size_2d(256, 33) == 16u * iq3xxs::TILE_SIZE,
-          "IQ3_XXS 33-row tile padding");
-    check(iq3xxs::repacked_size_2d(512, 32) == 16u * iq3xxs::TILE_SIZE,
+    check(iq3xxs::row_tile_size(256) == IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS one-superblock tail size");
+    check(iq3xxs::row_tile_size(512) == IQ3XXS_COMPACT_PAIR_SIZE,
+          "IQ3_XXS two-superblock pair size");
+    check(iq3xxs::row_tile_size(768) == IQ3XXS_COMPACT_PAIR_SIZE + IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS pair plus odd tail size");
+    check(iq3xxs::row_tile_size(1024) == 2u * IQ3XXS_COMPACT_PAIR_SIZE,
+          "IQ3_XXS two pair supertiles");
+    check(iq3xxs::row_tile_size(4096) == 8u * IQ3XXS_COMPACT_PAIR_SIZE,
+          "IQ3_XXS eight pair supertiles");
+    check(iq3xxs::repacked_size_2d(256, 31) == IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS 31-row allocation");
+    check(iq3xxs::repacked_size_2d(256, 32) == IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS 32-row allocation");
+    check(iq3xxs::repacked_size_2d(256, 33) == 2u * IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS 33-row padding");
+    check(iq3xxs::repacked_size_2d(512, 32) == IQ3XXS_COMPACT_PAIR_SIZE,
           "IQ3_XXS two superblocks per row");
+    check(iq3xxs::repacked_size_2d(768, 32) == IQ3XXS_COMPACT_PAIR_SIZE + IQ3XXS_COMPACT_TAIL_SIZE,
+          "IQ3_XXS odd final superblock");
+    check(iq3xxs::repacked_size_2d(1280, 65) == 3u * (2u * IQ3XXS_COMPACT_PAIR_SIZE + IQ3XXS_COMPACT_TAIL_SIZE),
+          "IQ3_XXS multi-pair allocation with padded rows");
     check(!iq3xxs::valid_2d_shape(255, 32), "IQ3_XXS rejects a partial superblock");
     check(iq3xxs::original_size_2d(INT64_MAX - 255, INT64_MAX) == 0,
           "IQ3_XXS rejects overflowing dimensions");
+    size_t total = 0;
+    check(iq3_compact_xxs_total_size(768, 33, 2, 3, &total) && total == 6u * 2u * (IQ3XXS_COMPACT_PAIR_SIZE + IQ3XXS_COMPACT_TAIL_SIZE),
+          "IQ3_XXS 4D allocation formula");
+    check(!iq3_compact_xxs_total_size(INT64_MAX, INT64_MAX, INT64_MAX, INT64_MAX, &total),
+          "IQ3_XXS rejects overflowing 4D allocation");
 }
 
 static void test_iq3xxs_raw_roundtrip(int64_t ne0, int64_t ne1) {
@@ -1772,10 +1791,12 @@ static void test_iq3xxs_raw_roundtrip(int64_t ne0, int64_t ne1) {
     check(std::memcmp(original.data(), roundtrip.data(), original_size) == 0,
           "IQ3_XXS raw bytes survive repack and unpack exactly");
 
-    std::vector<uint8_t> range(127);
-    check(iq3xxs::readback_2d(packed.data(), packed.size(), ne0, ne1, 81, range.data(), range.size()),
+    const size_t range_offset = original_size > 81 ? 81 : original_size / 2;
+    const size_t range_size = std::min<size_t>(127, original_size - range_offset);
+    std::vector<uint8_t> range(range_size);
+    check(iq3xxs::readback_2d(packed.data(), packed.size(), ne0, ne1, range_offset, range.data(), range.size()),
           "IQ3_XXS partial byte-range readback succeeds");
-    check(std::memcmp(range.data(), raw + 81, range.size()) == 0,
+    check(std::memcmp(range.data(), raw + range_offset, range.size()) == 0,
           "IQ3_XXS partial byte-range readback is exact");
 
     if (ne1 >= 33) {
@@ -1825,21 +1846,60 @@ static void test_iq3xxs_quantized_reference() {
     check(matrix_size == iq3xxs::repacked_size_2d(ne0, ne1), "IQ3_XXS reference covers padded rows");
 }
 
-static void test_iq3xxs_duplicate_d_validation() {
-    const int64_t ne0 = 256;
-    const int64_t ne1 = 1;
-    std::vector<block_iq3_xxs> raw(1);
-    std::memset(raw.data(), 0x5a, sizeof(block_iq3_xxs));
-    std::vector<uint8_t> packed(iq3xxs::repacked_size_2d(ne0, ne1));
-    check(iq3xxs::repack_2d(raw.data(), sizeof(block_iq3_xxs), ne0, ne1, packed.data(), packed.size()),
-          "IQ3_XXS duplicate-d fixture repack succeeds");
-    packed[iq3xxs::TILE_SIZE + iq3xxs::D_PLANE_OFFSET] ^= 1;
-    std::vector<block_iq3_xxs> roundtrip(1);
-    check(!iq3xxs::unpack_2d(packed.data(), packed.size(), ne0, ne1, roundtrip.data(), sizeof(block_iq3_xxs)),
-          "IQ3_XXS unpack rejects inconsistent duplicated d");
-    uint8_t byte = 0;
-    check(!iq3xxs::readback_2d(packed.data(), packed.size(), ne0, ne1, 0, &byte, 1),
-          "IQ3_XXS readback rejects inconsistent duplicated d");
+static void test_iq3xxs_compact_metadata() {
+    const int64_t ne0 = 768;
+    const int64_t ne1 = 33;
+    const size_t raw_size = iq3xxs::original_size_2d(ne0, ne1);
+    const size_t packed_size = iq3xxs::repacked_size_2d(ne0, ne1);
+    std::vector<block_iq3_xxs> raw(raw_size / sizeof(block_iq3_xxs));
+    std::vector<uint8_t> guarded(packed_size + 128, 0xa5);
+    uint8_t * packed = guarded.data() + 64;
+    uint32_t rng = 0x9e3779b9u;
+    for (size_t i = 0; i < raw_size; ++i) {
+        reinterpret_cast<uint8_t *>(raw.data())[i] = (uint8_t) xorshift32(rng);
+    }
+    check(iq3xxs::repack_2d(raw.data(), raw_size, ne0, ne1, packed, packed_size),
+          "IQ3_XXS compact metadata repack succeeds");
+    check(std::all_of(guarded.begin(), guarded.begin() + 64, [](uint8_t b) { return b == 0xa5; }) &&
+          std::all_of(guarded.end() - 64, guarded.end(), [](uint8_t b) { return b == 0xa5; }),
+          "IQ3_XXS repack preserves allocation canaries");
+    check(std::all_of(packed + packed_size - 64, packed + packed_size, [](uint8_t b) { return b == 0; }),
+          "IQ3_XXS odd-tail alignment padding is zero");
+    std::vector<block_iq3_xxs> roundtrip(raw.size());
+    check(iq3xxs::unpack_2d(packed, packed_size, ne0, ne1, roundtrip.data(), raw_size),
+          "IQ3_XXS compact metadata unpack succeeds");
+    check(std::memcmp(raw.data(), roundtrip.data(), raw_size) == 0,
+          "IQ3_XXS compact metadata readback is exact");
+}
+
+static void test_iq3xxs_4d_slices() {
+    const int64_t ne0 = 1280;
+    const int64_t ne1 = 33;
+    const int64_t ne2 = 2;
+    const int64_t ne3 = 3;
+    const size_t raw_slice = iq3xxs::original_size_2d(ne0, ne1);
+    const size_t packed_slice = iq3xxs::repacked_size_2d(ne0, ne1);
+    size_t packed_total = 0;
+    check(iq3_compact_xxs_total_size(ne0, ne1, ne2, ne3, &packed_total) &&
+          packed_total == packed_slice * (size_t) ne2 * (size_t) ne3,
+          "IQ3_XXS 4D slices match allocation formula");
+    std::vector<block_iq3_xxs> raw(raw_slice * (size_t) ne2 * (size_t) ne3 / sizeof(block_iq3_xxs));
+    std::vector<block_iq3_xxs> roundtrip(raw.size());
+    std::vector<uint8_t> packed(packed_total);
+    uint32_t rng = 0x243f6a88u;
+    for (size_t i = 0; i < raw.size() * sizeof(block_iq3_xxs); ++i) {
+        reinterpret_cast<uint8_t *>(raw.data())[i] = (uint8_t) xorshift32(rng);
+    }
+    for (size_t slice = 0; slice < (size_t) ne2 * (size_t) ne3; ++slice) {
+        check(iq3xxs::repack_2d(raw.data() + slice * (raw_slice / sizeof(block_iq3_xxs)), raw_slice,
+                                ne0, ne1, packed.data() + slice * packed_slice, packed_slice),
+              "IQ3_XXS 4D slice repack succeeds");
+        check(iq3xxs::unpack_2d(packed.data() + slice * packed_slice, packed_slice, ne0, ne1,
+                                roundtrip.data() + slice * (raw_slice / sizeof(block_iq3_xxs)), raw_slice),
+              "IQ3_XXS 4D slice readback succeeds");
+    }
+    check(std::memcmp(raw.data(), roundtrip.data(), raw.size() * sizeof(block_iq3_xxs)) == 0,
+          "IQ3_XXS 4D slice roundtrip is exact");
 }
 
 namespace iq3s = ggml_hexagon_iq3s;
@@ -1950,12 +2010,15 @@ static void test_iq3s_duplicate_d_validation() {
 int main() {
     test_iq3xxs_sizes();
     for (const auto & shape : std::vector<std::pair<int64_t, int64_t>> {
-            {256, 31}, {256, 32}, {256, 33}, {512, 33}, {1024, 33},
+            {256, 1}, {256, 31}, {256, 32}, {256, 33}, {256, 63}, {256, 64}, {256, 65},
+            {512, 31}, {512, 32}, {512, 33}, {768, 31}, {768, 32}, {768, 33},
+            {1024, 33}, {1280, 65}, {4096, 65},
         }) {
         test_iq3xxs_raw_roundtrip(shape.first, shape.second);
     }
     test_iq3xxs_quantized_reference();
-    test_iq3xxs_duplicate_d_validation();
+    test_iq3xxs_compact_metadata();
+    test_iq3xxs_4d_slices();
     test_iq3s_sizes();
     for (const auto & shape : std::vector<std::pair<int64_t, int64_t>> {
             {256, 1}, {256, 31}, {256, 32}, {256, 33}, {512, 33}, {1024, 65},

@@ -8,6 +8,7 @@
 #include <HAP_compute_res.h>
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
 
@@ -560,10 +561,13 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
     const uint32_t tile_size = TILE_SIZE;                                                                                                  \
     const uint32_t aligned_tile_size = hex_align_up(tile_size, 128);                                                                       \
                                                                                                                                            \
-    uint32_t n_k_tiles_w = ne00 / 32;                                                                                                      \
-    uint32_t n_k_tiles_a = ne10 / 32;                                                                                                      \
-    uint32_t tile_row_stride = n_k_tiles_w * tile_size;                                                                                    \
-    uint32_t tile_row_transfer_size_aligned = n_k_tiles_a * aligned_tile_size;                                                             \
+    const bool compact_iq3_xxs = src0->type == HTP_TYPE_IQ3_XXS; \
+    size_t compact_row_tile_bytes = compact_iq3_xxs ? htp_mm_iq3_xxs_compact_row_tile_size(ne00) : 0; \
+    assert(!compact_iq3_xxs || (compact_row_tile_bytes > 0 && compact_row_tile_bytes <= UINT32_MAX)); \
+    uint32_t n_k_tiles_w = ne00 / 32; \
+    uint32_t n_k_tiles_a = ne10 / 32; \
+    uint32_t tile_row_stride = compact_iq3_xxs ? (uint32_t) compact_row_tile_bytes : n_k_tiles_w * tile_size; \
+    uint32_t tile_row_transfer_size_aligned = compact_iq3_xxs ? (uint32_t) compact_row_tile_bytes : n_k_tiles_a * aligned_tile_size; \
                                                                                                                                            \
     uint32_t ct_start = src0_start_row / 32;                                                                                               \
     uint32_t ct_end   = (src0_end_row + 31) / 32;                                                                                          \
@@ -571,8 +575,14 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
     uint32_t push_ct = ct_start;                                                                                                           \
     if (src0_start_row < src0_end_row) {                                                                                                   \
         for (uint32_t d = 0; d < n_prefetch && push_ct < ct_end; d++, push_ct++) {                                                         \
-            dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned,                                        \
-                           src0_row + push_ct * tile_row_stride), aligned_tile_size, tile_size, tile_size, n_k_tiles_a);                   \
+            if (compact_iq3_xxs) { \
+                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                               src0_row + (size_t) push_ct * tile_row_stride), compact_row_tile_bytes, compact_row_tile_bytes, \
+                               compact_row_tile_bytes, 1); \
+            } else { \
+                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                               src0_row + push_ct * tile_row_stride), aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
+            } \
         }                                                                                                                                  \
     }                                                                                                                                      \
                                                                                                                                            \
@@ -623,8 +633,13 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
         htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);                                                                              \
                                                                                                                                            \
         if (push_ct < ct_end) {                                                                                                            \
-            dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + push_ct * tile_row_stride),                                             \
-                           aligned_tile_size, tile_size, tile_size, n_k_tiles_a);                                                          \
+            if (compact_iq3_xxs) { \
+                dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + (size_t) push_ct * tile_row_stride), \
+                               compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1); \
+            } else { \
+                dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + push_ct * tile_row_stride), \
+                               aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
+            } \
             push_ct++;                                                                                                                     \
         }                                                                                                                                  \
     }                                                                                                                                      \
@@ -1098,11 +1113,14 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
     const uint32_t tile_size = TILE_SIZE;                                                                                                                   \
     const uint32_t aligned_tile_size = hex_align_up(tile_size, 128);                                                                                        \
                                                                                                                                                             \
-    const uint32_t n_k_tiles_w = ne00 / 32;                                                                                                                 \
-    const uint32_t n_k_tiles_a = ne10 / 32;                                                                                                                 \
-    const uint32_t tile_row_stride = n_k_tiles_w * tile_size;                                                                                               \
-    const uint32_t tile_row_transfer_size_aligned = n_k_tiles_a * aligned_tile_size;                                                                        \
-    const uint32_t src0_slice_stride = ((ne01 + 31) / 32) * tile_row_stride;                                                                                \
+    const bool compact_iq3_xxs = src0->type == HTP_TYPE_IQ3_XXS; \
+    size_t compact_row_tile_bytes = compact_iq3_xxs ? htp_mm_iq3_xxs_compact_row_tile_size(ne00) : 0; \
+    assert(!compact_iq3_xxs || (compact_row_tile_bytes > 0 && compact_row_tile_bytes <= UINT32_MAX)); \
+    const uint32_t n_k_tiles_w = ne00 / 32; \
+    const uint32_t n_k_tiles_a = ne10 / 32; \
+    const uint32_t tile_row_stride = compact_iq3_xxs ? (uint32_t) compact_row_tile_bytes : n_k_tiles_w * tile_size; \
+    const uint32_t tile_row_transfer_size_aligned = compact_iq3_xxs ? (uint32_t) compact_row_tile_bytes : n_k_tiles_a * aligned_tile_size; \
+    const uint32_t src0_slice_stride = ((ne01 + 31) / 32) * tile_row_stride; \
                                                                                                                                                             \
     const uint32_t ct_start = src0_start_row / 32;                                                                                                          \
     const uint32_t ct_end   = (src0_end_row + 31) / 32;                                                                                                     \
@@ -1141,9 +1159,15 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
                                                                                                                                                             \
         uint32_t push_ct = ct_start;                                                                                                                        \
         for (uint32_t d = 0; d < n_prefetch && push_ct < ct_end; d++, push_ct++) {                                                                          \
-            dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned,                                                         \
-                           src0_slice + (size_t) push_ct * tile_row_stride),                                                                                \
-                           aligned_tile_size, tile_size, tile_size, n_k_tiles_a);                                                                           \
+            if (compact_iq3_xxs) { \
+                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                               src0_slice + (size_t) push_ct * tile_row_stride), compact_row_tile_bytes, compact_row_tile_bytes, \
+                               compact_row_tile_bytes, 1); \
+            } else { \
+                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                               src0_slice + (size_t) push_ct * tile_row_stride), \
+                               aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
+            } \
         }                                                                                                                                                   \
                                                                                                                                                             \
         for (uint32_t ct = ct_start; ct < ct_end; ct++) {                                                                                                   \
@@ -1187,8 +1211,13 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
             htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_COMP, ct);                                                                                           \
                                                                                                                                                             \
             if (push_ct < ct_end) {                                                                                                                         \
-                dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride),                                               \
-                               aligned_tile_size, tile_size, tile_size, n_k_tiles_a);                                                                       \
+                if (compact_iq3_xxs) { \
+                    dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride), \
+                                   compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1); \
+                } else { \
+                    dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride), \
+                                   aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
+                } \
                 push_ct++;                                                                                                                                  \
             }                                                                                                                                               \
         }                                                                                                                                                   \
@@ -2126,7 +2155,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 case HTP_TYPE_IQ2_S:  matmul_job_func = hvx_mv_2d_repacked_iq2_s;  break;
                 case HTP_TYPE_IQ2_XS:
                 case HTP_TYPE_IQ2_XXS: matmul_job_func = hvx_mv_2d_repacked_iq2f;   break;
-                case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mv_2d_repacked_iq3_xxs; break;
+                case HTP_TYPE_IQ3_XXS: matmul_job_func = hvx_mm_2d_repacked_iq3_xxs; break;
                 case HTP_TYPE_IQ3_S:   matmul_job_func = hvx_mv_2d_repacked_iq3_s;   break;
                 case HTP_TYPE_Q5_K:   matmul_job_func = hvx_mv_2d_repacked_q5_k;   break;
                 case HTP_TYPE_Q6_K:   matmul_job_func = hvx_mv_2d_repacked_q6_k;   break;

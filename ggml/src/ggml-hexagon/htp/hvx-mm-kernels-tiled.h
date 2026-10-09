@@ -1079,17 +1079,24 @@ static void tiled_vec_dot_iq2f_32x2(const uint32_t n, float * restrict s0, float
 static void tiled_vec_dot_iq3_xxs_scalar_32x1(const uint32_t n, float * restrict s,
         const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz,
         const uint32_t * restrict grid, const uint8_t * restrict signs) {
-    const uint8_t * weights = vx;
+    const uint8_t * row_tile = vx;
     const uint8_t * activation = vy;
     for (uint32_t row = 0; row < valid_rows; ++row) {
         float sum = 0.0f;
-        for (uint32_t kt = 0; kt < n / 32; ++kt) {
-            const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+        for (uint64_t kt = 0; kt < n / 32; ++kt) {
+            iq3_compact_offsets offsets = {0};
+            const int offsets_ok = iq3_compact_xxs_offsets(n, kt, &offsets);
+            if (!offsets_ok) {
+                FARF(ERROR, "ggml-hex: IQ3_XXS compact offset calculation failed : n %u kt %llu\n",
+                     n, (unsigned long long) kt);
+                abort();
+            }
+            const uint8_t * tile = row_tile + offsets.data_tile;
             const int8_t * act = (const int8_t *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
             uint32_t aux;
             __fp16 d, da;
             memcpy(&aux, tile + 256 + 4 * row, sizeof(aux));
-            memcpy(&d, tile + 384 + 2 * row, sizeof(d));
+            memcpy(&d, row_tile + offsets.d_plane + 2 * row, sizeof(d));
             memcpy(&da, act + 1024, sizeof(da));
             const float db = (float) d * (0.5f + (aux >> 28)) * 0.5f;
             int32_t dot = 0;
@@ -1130,11 +1137,11 @@ static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, H
     return Q6_W_vcombine_VV(w1, w0);
 }
 
-static inline HVX_Vector iq3_xxs_scale_vector(const uint8_t * tile, HVX_Vector aux, HVX_Vector activation_scale) {
+static inline HVX_Vector iq3_xxs_scale_vector(HVX_Vector d, HVX_Vector aux, HVX_Vector activation_scale) {
     const HVX_Vector scale = Q6_Vsf_equals_Vw(Q6_Vuw_vlsr_VuwR(aux, 28));
     const HVX_Vector half = hvx_vec_splat_f32(0.5f);
     const HVX_Vector factor = hvx_vec_mul_f32_f32(hvx_vec_add_f32_f32(scale, half), half);
-    const HVX_Vector base = hvx_vec_mul_f16_f16_to_f32_lower32(hvx_vmemu(tile + 384), activation_scale);
+    const HVX_Vector base = hvx_vec_mul_f16_f16_to_f32_lower32(d, activation_scale);
     return hvx_vec_mul_f32_f32(base, factor);
 }
 
@@ -1145,13 +1152,20 @@ static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, con
         tiled_vec_dot_iq3_xxs_scalar_32x1(n, s, vx, vy, valid_rows, sz, grid, signs);
         return;
     }
-    const uint8_t * weights = vx;
+    const uint8_t * row_tile = vx;
     const uint8_t * activation = vy;
     HVX_Vector sum = Q6_V_vzero();
+    HVX_Vector d_scale = Q6_V_vzero();
     for (uint32_t kt = 0; kt < n / 32; ++kt) {
-        const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_XXS;
+        iq3_compact_offsets offsets;
+        assert(iq3_compact_xxs_offsets(n, kt, &offsets));
+        const uint8_t * tile = row_tile + offsets.data_tile;
         const HVX_Vector * act = (const HVX_Vector *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
         const HVX_Vector aux = hvx_vmemu(tile + 256);
+        if (offsets.group == 0) {
+            HVX_Vector d_pair = hvx_vmemu(row_tile + offsets.d_plane);
+            d_scale = Q6_V_vror_VR(d_pair, offsets.lane * 64);
+        }
         HVX_Vector dot = Q6_V_vzero();
         for (int l = 0; l < 4; ++l) {
             const HVX_VectorPair w = iq3_xxs_unpack_group_gather(tile, aux, l, grid, signs, scratch);
@@ -1159,7 +1173,7 @@ static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, con
             dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_hi_W(w), act[2 * l + 1]);
         }
         sum = hvx_vec_add_f32_f32(sum,
-            hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot), iq3_xxs_scale_vector(tile, aux, act[8])));
+            hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot), iq3_xxs_scale_vector(d_scale, aux, act[8])));
     }
     if (sz) {
         sum = hvx_vec_add_f32_f32(sum, hvx_vmemu(sz));
