@@ -1157,13 +1157,24 @@ static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, con
     HVX_Vector sum = Q6_V_vzero();
     HVX_Vector d_scale = Q6_V_vzero();
     for (uint32_t kt = 0; kt < n / 32; ++kt) {
-        iq3_compact_offsets offsets;
-        assert(iq3_compact_xxs_offsets(n, kt, &offsets));
+        iq3_compact_offsets offsets = {0};
+        const int offsets_ok = iq3_compact_xxs_offsets(n, kt, &offsets);
+        if (!offsets_ok) {
+            FARF(ERROR, "ggml-hex: IQ3_XXS compact offset calculation failed : n %u kt %llu\n",
+                 n, (unsigned long long) kt);
+            abort();
+        }
         const uint8_t * tile = row_tile + offsets.data_tile;
         const HVX_Vector * act = (const HVX_Vector *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
         const HVX_Vector aux = hvx_vmemu(tile + 256);
         if (offsets.group == 0) {
-            HVX_Vector d_pair = hvx_vmemu(row_tile + offsets.d_plane);
+            // The D-pair is the terminal 128 B of the pair, and the tail
+            // D-plane plus its 64 B alignment padding is the terminal 128 B
+            // of the tail. Load from the D-pair start so the 128 B HVX load
+            // never leaves the tile allocation; the rotate then puts exactly
+            // this lane's 64 B D-plane in the low half that the scale
+            // vector consumes.
+            HVX_Vector d_pair = hvx_vmemu(row_tile + offsets.d_plane - offsets.lane * 64);
             d_scale = Q6_V_vror_VR(d_pair, offsets.lane * 64);
         }
         HVX_Vector dot = Q6_V_vzero();
