@@ -147,7 +147,19 @@ struct htp_mm_context {
     uint32_t vtcm_src2_size_per_thread;
     uint32_t vtcm_src3_size_per_thread;
     uint32_t vtcm_dst_size_per_thread;
+
+    // Compact (IQ3_XXS) DMA push failure flag per thread, checked after job join
+    uint32_t dma_push_fail[WORK_QUEUE_MAX_N_THREADS];
 };
+
+static bool htp_mm_dma_push_failed(const struct htp_mm_context * mmctx, uint32_t n_threads) {
+    for (uint32_t i = 0; i < n_threads; ++i) {
+        if (mmctx->dma_push_fail[i]) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static int htp_mm_init_context(
     struct htp_ops_context * octx,
@@ -529,6 +541,13 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
     tiled_vec_dot_iq3_s_32x2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1, \
                             htp_iq3s_grid_of(octx), htp_iq3s_scratch_of(octx, ith))
 
+// Test builds (IQ3XXS_TEST_DMA_FAIL) force the first compact prefetch push per thread to fail
+#ifdef IQ3XXS_TEST_DMA_FAIL
+#define IQ3XXS_TEST_DMA_FAIL_SET(d) if ((d) == 0) pushed = false;
+#else
+#define IQ3XXS_TEST_DMA_FAIL_SET(d)
+#endif
+
 // Specialized repacked matmul macros
 #define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
 static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void * data) {                                                 \
@@ -576,9 +595,15 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
     if (src0_start_row < src0_end_row) {                                                                                                   \
         for (uint32_t d = 0; d < n_prefetch && push_ct < ct_end; d++, push_ct++) {                                                         \
             if (compact_iq3_xxs) { \
-                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                bool pushed = dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
                                src0_row + (size_t) push_ct * tile_row_stride), compact_row_tile_bytes, compact_row_tile_bytes, \
                                compact_row_tile_bytes, 1); \
+                IQ3XXS_TEST_DMA_FAIL_SET(d) \
+                if (!pushed) { \
+                    mmctx->dma_push_fail[ith] = 1; \
+                    dma_queue_flush(dma_q); \
+                    return; \
+                } \
             } else { \
                 dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
                                src0_row + push_ct * tile_row_stride), aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
@@ -634,8 +659,12 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
                                                                                                                                            \
         if (push_ct < ct_end) {                                                                                                            \
             if (compact_iq3_xxs) { \
-                dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + (size_t) push_ct * tile_row_stride), \
-                               compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1); \
+                if (!dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + (size_t) push_ct * tile_row_stride), \
+                                compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1)) { \
+                    mmctx->dma_push_fail[ith] = 1; \
+                    dma_queue_flush(dma_q); \
+                    return; \
+                } \
             } else { \
                 dma_queue_push(dma_q, dma_make_data(w_tile, src0_row + push_ct * tile_row_stride), \
                                aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
@@ -856,7 +885,7 @@ MATMUL_2D_REPACKED_IMPL(q2_k,       512,  tiled_vec_dot_q2_k_32x2,  tiled_vec_do
 MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
 MATMUL_2D_REPACKED_IMPL(mxfp4,      544,  tiled_vec_dot_mxfp4_32x2, tiled_vec_dot_mxfp4_32x1)
 
-static void hvx_mm_transfer_src1_dma(
+static bool hvx_mm_transfer_src1_dma(
     struct htp_ops_context * octx,
     const struct htp_mm_kernel_params * kparams,
     const struct htp_tensor * src1,
@@ -866,7 +895,7 @@ static void hvx_mm_transfer_src1_dma(
     uint32_t m_rows
 ) {
     if (m_rows == 0) {
-        return;
+        return true;
     }
 
     dma_queue * dma_q = octx->ctx->dma[0];
@@ -881,8 +910,11 @@ static void hvx_mm_transfer_src1_dma(
 
     if (is_contiguous) {
         const dma_addr_t src_addr = src_base + m_start * src1_nb1;
-        dma_queue_push(dma_q, dma_make_data(dst_base, src_addr),
-                       dst_row_size, src1_nb1, row_bytes, m_rows);
+        if (!dma_queue_push(dma_q, dma_make_data(dst_base, src_addr),
+                            dst_row_size, src1_nb1, row_bytes, m_rows)) {
+            FARF(ERROR, "dma-error: src1 transfer push failed (contiguous) m_rows %u\n", m_rows);
+            return false;
+        }
         dma_queue_pop(dma_q);
     } else {
         const uint32_t ne12_ne1 = src1->ne[2] * src1->ne[1];
@@ -905,8 +937,11 @@ static void hvx_mm_transfer_src1_dma(
                                                    i12 * src1->nb[2] +
                                                    i13 * src1->nb[3]);
             uint8_t * row_dst = dst_base + ir * dst_row_size;
-            dma_queue_push(dma_q, dma_make_data(row_dst, row_src),
-                           dst_row_size, src1_nb1, row_bytes, 1);
+            if (!dma_queue_push(dma_q, dma_make_data(row_dst, row_src),
+                                dst_row_size, src1_nb1, row_bytes, 1)) {
+                FARF(ERROR, "dma-error: src1 transfer push failed (per-row) ir %u\n", ir);
+                return false;
+            }
             dma_queue_pop(dma_q);
         }
     }
@@ -926,6 +961,8 @@ static void hvx_mm_transfer_src1_dma(
         }
         htp_trace_event_stop(tr, HTP_TRACE_EVT_HVX_A_PREP, (uint16_t) m_start);
     }
+
+    return true;
 }
 
 #define QUANTIZE_IMPL(name, log_name, kernel_fn, dst_row_size_expr)                                        \
@@ -1160,9 +1197,13 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
         uint32_t push_ct = ct_start;                                                                                                                        \
         for (uint32_t d = 0; d < n_prefetch && push_ct < ct_end; d++, push_ct++) {                                                                          \
             if (compact_iq3_xxs) { \
-                dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
+                if (!dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
                                src0_slice + (size_t) push_ct * tile_row_stride), compact_row_tile_bytes, compact_row_tile_bytes, \
-                               compact_row_tile_bytes, 1); \
+                               compact_row_tile_bytes, 1)) { \
+                    mmctx->dma_push_fail[ith] = 1; \
+                    dma_queue_flush(dma_q); \
+                    return; \
+                } \
             } else { \
                 dma_queue_push(dma_q, dma_make_data(vtcm_src0_ptr + d * tile_row_transfer_size_aligned, \
                                src0_slice + (size_t) push_ct * tile_row_stride), \
@@ -1212,8 +1253,12 @@ static void hvx_mm_4d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
                                                                                                                                                             \
             if (push_ct < ct_end) {                                                                                                                         \
                 if (compact_iq3_xxs) { \
-                    dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride), \
-                                   compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1); \
+                    if (!dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride), \
+                                   compact_row_tile_bytes, compact_row_tile_bytes, compact_row_tile_bytes, 1)) { \
+                        mmctx->dma_push_fail[ith] = 1; \
+                        dma_queue_flush(dma_q); \
+                        return; \
+                    } \
                 } else { \
                     dma_queue_push(dma_q, dma_make_data(w_tile, src0_slice + (size_t) push_ct * tile_row_stride), \
                                    aligned_tile_size, tile_size, tile_size, n_k_tiles_a); \
@@ -2282,6 +2327,28 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
 
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
+#ifdef IQ3XXS_DIAG_GUARD
+    // Diagnostic canaries for the IQ3_XXS gather path (diag builds only)
+    const bool p8_iq3xxs = (octx->flags & HTP_OPFLAGS_IQ3XXS_GATHER) && src0->type == HTP_TYPE_IQ3_XXS;
+    uint8_t * p8_canary_op  = NULL;
+    uint8_t * p8_canary_scr = NULL;
+    uint8_t   p8_scr_save[128];
+
+    if (p8_iq3xxs) {
+        if (octx->ctx->vtcm_size >= vtcm_size + 128) {
+            p8_canary_op = base + vtcm_size;
+            memset(p8_canary_op, 0x5A, 128);
+        }
+        p8_canary_scr = octx->ctx->vtcm_base + octx->ctx->vtcm_size + IQ3S_GRID_OFFSET;
+        memcpy(p8_scr_save, p8_canary_scr, 128);
+        memset(p8_canary_scr, 0xA5, 128);
+        FARF(ALWAYS, "p8-iq3xxs: setup vtcm-op %zu vtcm-avail %zu reserve %d canary-op %p canary-scratch %p\n",
+             vtcm_size, octx->ctx->vtcm_size, HTP_IQ2S_GRID_VTCM_RESERVE, (void *) p8_canary_op, (void *) p8_canary_scr);
+    }
+#endif
+
+    bool dma_failed = false;
+
     if (kparams->m_chunk > 0 && (uint32_t) kparams->m_chunk < src1_nrows) {
         for (uint32_t m_start = 0; m_start < src1_nrows; m_start += m_chunk) {
             const uint32_t cur_m_rows = MIN(src1_nrows - m_start, m_chunk);
@@ -2289,7 +2356,10 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
             mmctx->cur_m_rows  = cur_m_rows;
 
             if (need_quant) {
-                hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, m_start, cur_m_rows);
+                if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, m_start, cur_m_rows)) {
+                    dma_failed = true;
+                    break;
+                }
 
                 const uint32_t qk = QK_Q8_0_TILED;
                 const uint32_t nb = (ne10 + qk - 1) / qk;
@@ -2315,25 +2385,81 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
                 mmctx->n_quant_tasks = quant_tasks;
                 work_queue_run(octx->ctx->work_queue, q_func, mmctx, quant_tasks);
             } else {
-                hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_src1, mmctx->vtcm_src1_stride, m_start, cur_m_rows);
+                if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_src1, mmctx->vtcm_src1_stride, m_start, cur_m_rows)) {
+                    dma_failed = true;
+                    break;
+                }
             }
 
             work_queue_run(octx->ctx->work_queue, matmul_job_func, mmctx, octx->n_threads);
+
+            if (htp_mm_dma_push_failed(mmctx, octx->n_threads)) {
+                dma_failed = true;
+                break;
+            }
         }
     } else {
         mmctx->cur_m_start = 0;
         mmctx->cur_m_rows  = src1_nrows;
 
         if (need_quant) {
-            hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, src1_nrows);
-            mmctx->n_quant_rows_per_thread = (src1_nrows + n_quant_tasks - 1) / n_quant_tasks;
-            mmctx->n_quant_tasks = n_quant_tasks;
-            work_queue_run(octx->ctx->work_queue, quant_task_func, mmctx, n_quant_tasks);
+            if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, src1_nrows)) {
+                dma_failed = true;
+            } else {
+                mmctx->n_quant_rows_per_thread = (src1_nrows + n_quant_tasks - 1) / n_quant_tasks;
+                mmctx->n_quant_tasks = n_quant_tasks;
+                work_queue_run(octx->ctx->work_queue, quant_task_func, mmctx, n_quant_tasks);
+            }
         } else {
-            hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_src1, mmctx->vtcm_src1_stride, 0, src1_nrows);
+            if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_src1, mmctx->vtcm_src1_stride, 0, src1_nrows)) {
+                dma_failed = true;
+            }
         }
 
-        work_queue_run(octx->ctx->work_queue, matmul_job_func, mmctx, octx->n_threads);
+        if (!dma_failed) {
+            work_queue_run(octx->ctx->work_queue, matmul_job_func, mmctx, octx->n_threads);
+            dma_failed = htp_mm_dma_push_failed(mmctx, octx->n_threads);
+        }
+    }
+
+#ifdef IQ3XXS_DIAG_GUARD
+    if (p8_iq3xxs) {
+#ifdef IQ3XXS_TEST_CANARY_CORRUPT
+        // test build: simulate a kernel overrun into the guard region
+        if (p8_canary_op) {
+            p8_canary_op[0] = 0x00;
+        }
+#endif
+        uint32_t p8_dma_fail  = 0;
+        uint32_t p8_dma_depth = 0;
+        for (uint32_t ith = 0; ith < octx->n_threads; ++ith) {
+            p8_dma_fail  += mmctx->dma_push_fail[ith];
+            p8_dma_depth += dma_queue_depth(octx->ctx->dma[ith]);
+        }
+        uint32_t p8_canary_err = 0;
+        if (p8_canary_op) {
+            for (int i = 0; i < 128; ++i) {
+                p8_canary_err += (p8_canary_op[i] != 0x5A);
+            }
+        }
+        uint32_t p8_scr_err = 0;
+        for (int i = 0; i < 128; ++i) {
+            p8_scr_err += (p8_canary_scr[i] != 0xA5);
+        }
+        memcpy(p8_canary_scr, p8_scr_save, 128);
+        FARF(ALWAYS, "p8-iq3xxs: done vtcm-op %zu dma-fail %u dma-depth %u canary-op-err %u canary-scratch-err %u\n",
+             vtcm_size, p8_dma_fail, p8_dma_depth, p8_canary_err, p8_scr_err);
+        if (p8_dma_fail || p8_canary_err || p8_scr_err) {
+            FARF(ERROR, "p8-iq3xxs: SAFETY VIOLATION dma-fail %u canary-op-err %u canary-scratch-err %u\n",
+                 p8_dma_fail, p8_canary_err, p8_scr_err);
+            return HTP_STATUS_INTERNAL_ERR;
+        }
+    }
+#endif
+
+    if (dma_failed) {
+        FARF(ERROR, "matmul-%s : DMA push/transfer failure, aborting\n", mmctx->type);
+        return HTP_STATUS_INTERNAL_ERR;
     }
 
     return HTP_STATUS_OK;
@@ -4396,7 +4522,9 @@ static int hvx_mm_matmul_id(
 
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
-    hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows);
+    if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows)) {
+        return HTP_STATUS_INTERNAL_ERR;
+    }
 
     mmctx->n_quant_rows_per_thread = (act_nrows + n_quant_tasks - 1) / n_quant_tasks;
     mmctx->n_quant_tasks = n_quant_tasks;
@@ -4549,7 +4677,9 @@ static int hvx_mm_matmul_id_nx(
 
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
-    hvx_mm_transfer_src1_dma(octx, kparams, act, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows);
+    if (!hvx_mm_transfer_src1_dma(octx, kparams, act, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows)) {
+        return HTP_STATUS_INTERNAL_ERR;
+    }
 
     mmctx->n_quant_rows_per_thread = (act_nrows + n_quant_tasks - 1) / n_quant_tasks;
     mmctx->n_quant_tasks           = n_quant_tasks;
@@ -4972,7 +5102,9 @@ int op_matmul_nx(struct htp_ops_context * octx) {
 
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
-    hvx_mm_transfer_src1_dma(octx, kparams, act, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows);
+    if (!hvx_mm_transfer_src1_dma(octx, kparams, act, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows)) {
+        return HTP_STATUS_INTERNAL_ERR;
+    }
 
     mmctx->n_quant_rows_per_thread = (act_nrows + n_quant_tasks - 1) / n_quant_tasks;
     mmctx->n_quant_tasks = n_quant_tasks;

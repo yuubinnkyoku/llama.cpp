@@ -25,6 +25,16 @@ include(ExternalProject)
 option(GGML_HEXAGON_HTP_DEBUG  "ggml-hexagon: enable HTP debug output" OFF)
 set(GGML_HEXAGON_HTP_BUILD_TYPE "Release" CACHE STRING "ggml-hexagon: HTP skel build type (Release, RelWithDebInfo, Debug)")
 set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
+option(GGML_HEXAGON_HTP_DIAG_GUARD "ggml-hexagon: HTP skel IQ3_XXS diagnostic guard (canaries and counters)" OFF)
+option(GGML_HEXAGON_HTP_TEST_DMA_FAIL "ggml-hexagon: TEST ONLY, force IQ3_XXS compact DMA push failure" OFF)
+option(GGML_HEXAGON_HTP_TEST_CANARY_CORRUPT "ggml-hexagon: TEST ONLY, corrupt IQ3_XXS canary after dispatch" OFF)
+
+if (GGML_HEXAGON_HTP_TEST_CANARY_CORRUPT AND NOT GGML_HEXAGON_HTP_DIAG_GUARD)
+    message(FATAL_ERROR "GGML_HEXAGON_HTP_TEST_CANARY_CORRUPT requires GGML_HEXAGON_HTP_DIAG_GUARD=ON")
+endif()
+if (GGML_HEXAGON_HTP_TEST_DMA_FAIL OR GGML_HEXAGON_HTP_TEST_CANARY_CORRUPT)
+    message(WARNING "hexagon: TEST fault injection flags are ON, do not ship this HTP skel")
+endif()
 
 add_library(htp_iface OBJECT
     ${CMAKE_CURRENT_BINARY_DIR}/htp_iface_stub.c)
@@ -71,6 +81,9 @@ function(build_htp_skel V)
             -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_ROOT}
             -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_ROOT}
             -DHEXAGON_HTP_DEBUG=${GGML_HEXAGON_HTP_DEBUG}
+            -DHEXAGON_HTP_DIAG_GUARD=${GGML_HEXAGON_HTP_DIAG_GUARD}
+            -DHEXAGON_HTP_TEST_DMA_FAIL=${GGML_HEXAGON_HTP_TEST_DMA_FAIL}
+            -DHEXAGON_HTP_TEST_CANARY_CORRUPT=${GGML_HEXAGON_HTP_TEST_CANARY_CORRUPT}
             -DDSP_VERSION=${V}
             -DPREBUILT_LIB_DIR="toolv19_${V}")
     list(APPEND HTP_SKELS ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp-${V}.so)
