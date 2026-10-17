@@ -141,6 +141,7 @@ static inline bool ggml_hexagon_is_fusion_enabled(int flag) {
 }
 
 static std::regex* opt_opfilter = NULL; // regex of ops to not claim
+static int         opt_ffn_offload = 1;  // allow FFN matmuls on HTP (0 = pin FFN to CPU)
 
 #define HEX_VERBOSE(...) \
     if (opt_verbose) GGML_LOG_DEBUG(__VA_ARGS__)
@@ -8870,6 +8871,14 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
         return false;
     }
 
+    // pin FFN matmuls to CPU when offload gating is disabled
+    if (!opt_ffn_offload &&
+            (op->op == GGML_OP_MUL_MAT || op->op == GGML_OP_MUL_MAT_ID) &&
+            strncmp(op->name, "ffn_", 4) == 0) {
+        ggml_hexagon_dump_op_supp(sess->name, op, false);
+        return false;
+    }
+
     bool supp = false;
     switch (op->op) {
         case GGML_OP_NONE:
@@ -9485,6 +9494,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     const char * str_iq2s_gather = getenv("GGML_HEXAGON_IQ2S_GATHER");
     const char * str_iq3xxs_gather = getenv("GGML_HEXAGON_IQ3XXS_GATHER");
     const char * str_iq3s_gather = getenv("GGML_HEXAGON_IQ3S_GATHER");
+    const char * str_ffn_offload = getenv("GGML_HEXAGON_FFN_OFFLOAD");
 
     // Init Arch first since it affects other defaults
     if (!str_arch) {
@@ -9538,6 +9548,9 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     opt_iq2s_gather = str_iq2s_gather ? atoi(str_iq2s_gather) != 0         : opt_iq2s_gather;
     opt_iq3xxs_gather = str_iq3xxs_gather ? atoi(str_iq3xxs_gather) != 0   : opt_iq3xxs_gather;
     opt_iq3s_gather = str_iq3s_gather ? atoi(str_iq3s_gather) != 0         : opt_iq3s_gather;
+    opt_ffn_offload = str_ffn_offload ? atoi(str_ffn_offload) != 0         : opt_ffn_offload;
+    HEX_VERBOSE("ggml-hex: ffn-offload %s (GGML_HEXAGON_FFN_OFFLOAD=%s)\n", opt_ffn_offload ? "enabled" : "disabled",
+                str_ffn_offload ? str_ffn_offload : "unset");
 
     // Parse device configuration
     const char * str_devices  = getenv("GGML_HEXAGON_DEVICES");

@@ -366,3 +366,9 @@ on 4 physical NPUs, or `--devices 'HTP0[0-1:0],HTP1[0-1:1]'` on 2 physical NPUs 
   # Disable ADD and SUB on Hexagon (fall back to CPU or GPU)
   ./scripts/snapdragon/run.py --target adb --hex-opfilter "ADD|SUB" -- llama-cli ...
   ```
+
+- `GGML_HEXAGON_FFN_OFFLOAD=0` (default: 1, FFN stays eligible for HTP)
+  Pins FFN matmuls (names starting with `ffn_`) to CPU when disabled. Attention and all
+  other ops keep their normal Hexagon placement. Set to `1` or leave unset to restore
+  the default HTP enrollment for FFN matmuls.
+
