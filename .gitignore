@@ -153,3 +153,14 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+
+# Local optimization worktrees (build outputs, device-test dumps, model bundles)
+
+/CMakeUserPresets.json
+/iq2s-device-test/
+/iq2s-v81-*/
+/iq2f-v81-bundle/
+/pkg15a/
+/pkg18a/
+/pkg-android/
+/pkg-iq3-xxs-v06/
