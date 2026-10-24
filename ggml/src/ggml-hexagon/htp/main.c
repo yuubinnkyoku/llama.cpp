@@ -1109,6 +1109,10 @@ static void mdev_group_init(struct htp_context * ctx, const struct htp_opbatch_r
 
 static int proc_op_req(struct htp_ops_context * octx, struct htp_buf_desc * bufs, uint32_t n_bufs,
                        struct htp_tensor * tens, uint32_t idx, struct htp_op_desc * op) {
+    if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
+        htp_mdev_group_barrier(octx);
+        return octx->status;
+    }
     memcpy(octx->op_params,     op->params, sizeof(octx->op_params));
     memcpy(octx->kernel_params, op->kernel_params, sizeof(octx->kernel_params));
     octx->flags         = op->flags;
@@ -1134,6 +1138,10 @@ static int proc_op_req(struct htp_ops_context * octx, struct htp_buf_desc * bufs
     }
 
     htp_tensor_flush_all(octx->ctx, octx->src, HTP_OP_MAX_INPUTS);
+    if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
+        htp_mdev_group_barrier(octx);
+        return octx->status;
+    }
 
     // Prep output tensors
     for (uint32_t i = 0; i < HTP_OP_MAX_OUTPUTS; i++) {
@@ -1150,8 +1158,15 @@ static int proc_op_req(struct htp_ops_context * octx, struct htp_buf_desc * bufs
     }
 
     htp_tensor_dirty_all(octx->ctx, octx->dsts, HTP_OP_MAX_OUTPUTS);
+    if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
+        htp_mdev_group_barrier(octx);
+        return octx->status;
+    }
 
     htp_mdev_group_barrier(octx);
+    if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
+        return octx->status;
+    }
 
     int status = execute_op(octx);
 
@@ -1209,9 +1224,11 @@ static void process_opbatch(struct htp_context * ctx, const struct htp_opbatch_r
 
     // Clean cache at the start of the batch
     htp_trace_event_start(&ctx->trace[0], HTP_TRACE_EVT_L2FLUSH, 0);
-    qurt_mem_cache_clean((qurt_addr_t) 0, 0, QURT_MEM_CACHE_FLUSH_INVALIDATE_ALL, QURT_MEM_DCACHE);
-    hex_l2fetch_block(ctx, ctx->footprint);
-    memset(ctx->dirty_ranges, 0, sizeof(ctx->dirty_ranges));
+    const int cache_start_status = qurt_mem_cache_clean((qurt_addr_t) 0, 0, QURT_MEM_CACHE_FLUSH_INVALIDATE_ALL, QURT_MEM_DCACHE);
+    if (cache_start_status == QURT_EOK) {
+        hex_l2fetch_block(ctx, ctx->footprint);
+        memset(ctx->dirty_ranges, 0, sizeof(ctx->dirty_ranges));
+    }
     htp_trace_event_stop(&ctx->trace[0], HTP_TRACE_EVT_L2FLUSH, 0);
 
     htp_trace_event_start(&ctx->trace[0], HTP_TRACE_EVT_BUFF, 0);
@@ -1235,6 +1252,10 @@ static void process_opbatch(struct htp_context * ctx, const struct htp_opbatch_r
 
     int op_status = HTP_STATUS_OK;
     octx->status  = HTP_STATUS_OK;
+    if (cache_start_status != QURT_EOK) {
+        FARF(ERROR, "batch cache preparation failed: %d", cache_start_status);
+        htp_ops_context_set_status(octx, HTP_STATUS_INTERNAL_ERR);
+    }
     for (uint32_t i = 0; i < n_ops; i++) {
         struct profile_data prof;
 
@@ -1265,7 +1286,11 @@ static void process_opbatch(struct htp_context * ctx, const struct htp_opbatch_r
 
     // Flush remaining dirty tensors at the end of the batch
     htp_trace_event_start(&ctx->trace[0], HTP_TRACE_EVT_L2FLUSH, 0);
-    qurt_mem_cache_clean((qurt_addr_t) 0, 0, QURT_MEM_CACHE_FLUSH_INVALIDATE_ALL, QURT_MEM_DCACHE);
+    const int cache_end_status = qurt_mem_cache_clean((qurt_addr_t) 0, 0, QURT_MEM_CACHE_FLUSH_INVALIDATE_ALL, QURT_MEM_DCACHE);
+    if (cache_end_status != QURT_EOK) {
+        FARF(ERROR, "batch cache completion failed: %d", cache_end_status);
+        htp_ops_context_set_status(octx, HTP_STATUS_INTERNAL_ERR);
+    }
     htp_trace_event_stop(&ctx->trace[0], HTP_TRACE_EVT_L2FLUSH, 0);
 
     htp_mdev_group_barrier(octx);
