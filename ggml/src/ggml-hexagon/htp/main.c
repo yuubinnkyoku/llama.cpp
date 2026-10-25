@@ -1157,6 +1157,12 @@ static int proc_op_req(struct htp_ops_context * octx, struct htp_buf_desc * bufs
             dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
     }
 
+    // Flush old dirty storage before a recycled output can be overwritten by DMA.
+    htp_tensor_flush_all(octx->ctx, octx->dsts, HTP_OP_MAX_OUTPUTS);
+    if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
+        htp_mdev_group_barrier(octx);
+        return octx->status;
+    }
     htp_tensor_dirty_all(octx->ctx, octx->dsts, HTP_OP_MAX_OUTPUTS);
     if (octx->status != HTP_STATUS_OK && op->opcode != HTP_OP_FENCE) {
         htp_mdev_group_barrier(octx);
