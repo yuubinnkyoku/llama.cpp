@@ -8024,6 +8024,7 @@ struct hex_split_plan {
     ggml_tensor                  y_dsp {};
     std::unique_ptr<htp_opnode>  dsp;
     uint8_t *                    cpu_w = nullptr;
+    const void *                 cpu_w_src = nullptr;
     ggml_tensor *                x_cpu = nullptr;
     ggml_tensor *                y_cpu = nullptr;
 };
@@ -8128,6 +8129,7 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
     }
     // the host share must read cached RAM: fastrpc memory is about 100x slower to read
     const size_t cpu_bytes = ggml_row_size(w->type, w->ne[0]) * (size_t) r;
+    plan.cpu_w_src = w->data;
     plan.cpu_w = (uint8_t *) malloc(cpu_bytes);
     if (!plan.cpu_w) {
         return nullptr;
@@ -8168,6 +8170,19 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     plan->x_cpu->data = op->src[1]->data;
     plan->y_cpu->data = op->data;
 
+    // A rebuilt graph may hand back the same name with a different weight address.
+    // A stale host copy would give silently wrong results.
+    const ggml_tensor * w_now = op->src[0];
+    if (plan->cpu_w_src != w_now->data) {
+        const size_t cpu_bytes = ggml_row_size(w_now->type, w_now->ne[0]) * (size_t) plan->r;
+        free(plan->cpu_w);
+        plan->cpu_w = (uint8_t *) malloc(cpu_bytes);
+        if (!plan->cpu_w) {
+            return GGML_STATUS_FAILED;
+        }
+        memcpy(plan->cpu_w, w_now->data, cpu_bytes);
+        plan->cpu_w_src = w_now->data;
+    }
     // Parameters must describe the halved tensors, not the original node. The
     // original node's m is twice the DSP share, so reusing its cached parameters
     // made the DSP write past its output on the second step.
