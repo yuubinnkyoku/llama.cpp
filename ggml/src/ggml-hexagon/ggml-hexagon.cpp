@@ -8126,6 +8126,9 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
     plan.y_dsp.src[0] = &plan.w_dsp;
     plan.y_dsp.src[1] = op->src[1];
 
+    GGML_LOG_INFO("ggml-hex: split %s: cpu rows %d of %" PRId64 " (dsp rows %" PRId64 "), weight %zu MiB\n",
+            op->name, r, m, m - r, ggml_nbytes(w) / (1024u * 1024u));
+
     hex_split_plan & ref = plans.emplace(op, std::move(plan)).first->second;
     ref.dsp = std::make_unique<htp_opnode>(HTP_OP_INVALID, &ref.y_dsp);
     return &ref;
@@ -8927,12 +8930,6 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev, struct
 
 static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(ggml_backend_dev_t dev) {
     auto dev_ctx = static_cast<ggml_backend_hexagon_device_context *>(dev->context);
-    // Phase 46: a split MUL_MAT is computed by the host and the DSP, so the
-    // tensors of an HTP split must be host readable. host_buffer_type is still
-    // DMA-able by the DSP.
-    if (hex_split_enabled()) {
-        return &dev_ctx->host_buffer_type;
-    }
     return &dev_ctx->buffer_type;
 }
 
