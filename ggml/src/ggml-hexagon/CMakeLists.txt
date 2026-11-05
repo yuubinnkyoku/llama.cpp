@@ -65,7 +65,7 @@ ggml_add_backend_library(${TARGET_NAME}
     libdl.h
     ../../include/ggml-hexagon.h)
 
-target_link_libraries(${TARGET_NAME} PRIVATE htp_iface ggml-cpu)
+target_link_libraries(${TARGET_NAME} PRIVATE htp_iface)
 target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/htp ${CMAKE_CURRENT_BINARY_DIR})
 
 # Build HTP skels

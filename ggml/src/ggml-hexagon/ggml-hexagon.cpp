@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <regex>
 #include <map>
+#include <dlfcn.h>
 #include <queue>
 #include <deque>
 #include <algorithm>
@@ -8055,21 +8056,28 @@ static int hex_split_cpu_rows(int64_t m) {
     return (int) r;
 }
 
+// Resolved at run time: linking ggml-cpu in here put a second copy of the CPU
+// backend symbols in the process, and the registry symbols live in libggml
+// which cannot be linked from a backend library.
 static ggml_backend_t hex_split_cpu_backend() {
     static ggml_backend_t be = []() -> ggml_backend_t {
-        ggml_backend_t b = ggml_backend_cpu_init();
-        if (b) {
-            const char * e = getenv("GGML_HEXAGON_SPLIT_THREADS");
-            const int    n = e ? atoi(e) : 6;
-            if (n > 0) {
-                ggml_backend_cpu_set_n_threads(b, n);
-            }
+        typedef ggml_backend_t (*init_t)(void);
+        typedef void           (*nthreads_t)(ggml_backend_t, int);
+        init_t     init     = (init_t)     dlsym(RTLD_DEFAULT, "ggml_backend_cpu_init");
+        nthreads_t nthreads = (nthreads_t) dlsym(RTLD_DEFAULT, "ggml_backend_cpu_set_n_threads");
+        if (!init) {
+            return nullptr;
+        }
+        ggml_backend_t b = init();
+        const char * e = getenv("GGML_HEXAGON_SPLIT_THREADS");
+        const int    n = e ? atoi(e) : 6;
+        if (b && nthreads && n > 0) {
+            nthreads(b, n);
         }
         return b;
     }();
     return be;
 }
-
 // weight rows [first, first + nrows) of a 2D quantized tensor
 static void hex_split_slice_w(ggml_tensor * dst, const ggml_tensor * t, int64_t first, int64_t nrows) {
     *dst = *t;
