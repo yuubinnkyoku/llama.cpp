@@ -8022,6 +8022,9 @@ struct hex_split_plan {
     ggml_tensor                  w_dsp {};
     ggml_tensor                  y_dsp {};
     std::unique_ptr<htp_opnode>  dsp;
+    uint8_t *                    cpu_w = nullptr;
+    ggml_tensor *                x_cpu = nullptr;
+    ggml_tensor *                y_cpu = nullptr;
 };
 
 static bool hex_split_enabled() {
@@ -8085,9 +8088,9 @@ static void hex_split_slice_y(ggml_tensor * dst, const ggml_tensor * t, int64_t 
 }
 
 static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
-    static std::map<const ggml_tensor *, hex_split_plan> plans;
+    static std::map<std::string, hex_split_plan> plans;
 
-    auto it = plans.find(op);
+    auto it = plans.find(op->name);
     if (it != plans.end()) {
         return &it->second;
     }
@@ -8115,9 +8118,18 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
                 op->name, w_cpu->nb[1], w->nb[1], x_cpu->nb[1], x->nb[1], y_cpu->nb[1], op->nb[1]);
         return nullptr;
     }
-    w_cpu->data = w->data;
+    // the host share must read cached RAM: fastrpc memory is about 100x slower to read
+    const size_t cpu_bytes = ggml_row_size(w->type, w->ne[0]) * (size_t) r;
+    plan.cpu_w = (uint8_t *) malloc(cpu_bytes);
+    if (!plan.cpu_w) {
+        return nullptr;
+    }
+    memcpy(plan.cpu_w, w->data, cpu_bytes);
+    w_cpu->data = plan.cpu_w;
     x_cpu->data = x->data;
     y_cpu->data = op->data;
+    plan.x_cpu = x_cpu;
+    plan.y_cpu = y_cpu;
     plan.gf = ggml_new_graph_custom(plan.ctx, 64, false);
     ggml_build_forward_expand(plan.gf, y_cpu);
 
@@ -8129,7 +8141,7 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
     GGML_LOG_INFO("ggml-hex: split %s: cpu rows %d of %" PRId64 " (dsp rows %" PRId64 "), weight %zu MiB\n",
             op->name, r, m, m - r, ggml_nbytes(w) / (1024u * 1024u));
 
-    hex_split_plan & ref = plans.emplace(op, std::move(plan)).first->second;
+    hex_split_plan & ref = plans.emplace(std::string(op->name), std::move(plan)).first->second;
     ref.dsp = std::make_unique<htp_opnode>(HTP_OP_INVALID, &ref.y_dsp);
     return &ref;
 }
@@ -8140,6 +8152,13 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     if (!cpu_be) {
         return GGML_STATUS_FAILED;
     }
+
+    // the graph may be rebuilt between tokens, so follow the current tensors
+    const ggml_tensor * op = node.node;
+    plan->y_dsp.data  = op->data;
+    plan->w_dsp.data  = (char *) op->src[0]->data + (size_t) plan->r * op->src[0]->nb[1];
+    plan->x_cpu->data = op->src[1]->data;
+    plan->y_cpu->data = op->data;
 
     memcpy(plan->dsp->kernel_params, params, sizeof(*params));
     plan->dsp->opcode = HTP_OP_MUL_MAT;
