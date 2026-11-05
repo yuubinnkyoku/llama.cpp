@@ -8164,11 +8164,31 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     plan->dsp->opcode = HTP_OP_MUL_MAT;
 
     // 1. submit the DSP share and let it run
+    const uint64_t t0 = hex_now_us();
     sess->enqueue_op(*plan->dsp);
     sess->flush_async();
+    const uint64_t t1 = hex_now_us();
 
     // 2. compute the CPU share while the DSP works
-    if (ggml_backend_graph_compute(cpu_be, plan->gf) != GGML_STATUS_SUCCESS) {
+    const ggml_status rc = ggml_backend_graph_compute(cpu_be, plan->gf);
+    const uint64_t t2 = hex_now_us();
+
+    static uint64_t sum_submit = 0, sum_cpu = 0;
+    static uint32_t n_calls = 0, msg_every = 0;
+    if (msg_every == 0) {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_TRACE");
+        msg_every = e ? (uint32_t) atoi(e) : 0;
+    }
+    sum_submit += t1 - t0;
+    sum_cpu    += t2 - t1;
+    if (msg_every > 0 && ++n_calls % msg_every == 0) {
+        GGML_LOG_INFO("ggml-hex: split trace n %u submit_us %llu cpu_us %llu\n", n_calls,
+                (unsigned long long) sum_submit, (unsigned long long) sum_cpu);
+        sum_submit = 0;
+        sum_cpu    = 0;
+    }
+
+    if (rc != GGML_STATUS_SUCCESS) {
         return GGML_STATUS_FAILED;
     }
 
