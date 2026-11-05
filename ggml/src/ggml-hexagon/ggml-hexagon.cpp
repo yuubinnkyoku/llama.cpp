@@ -8168,7 +8168,12 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     plan->x_cpu->data = op->src[1]->data;
     plan->y_cpu->data = op->data;
 
-    memcpy(plan->dsp->kernel_params, params, sizeof(*params));
+    // Parameters must describe the halved tensors, not the original node. The
+    // original node's m is twice the DSP share, so reusing its cached parameters
+    // made the DSP write past its output on the second step.
+    GGML_UNUSED(params);
+    ggml_hexagon_precompute_matmul_params(sess, &plan->w_dsp, plan->y_dsp.src[1], &plan->y_dsp,
+            (struct htp_mm_kernel_params *) plan->dsp->kernel_params);
     plan->dsp->opcode = HTP_OP_MUL_MAT;
 
     // 1. submit the DSP share and let it run
