@@ -1290,6 +1290,15 @@ struct test_case {
     }
 
     virtual bool run_whole_graph() { return false; }
+    // Nodes re-appended for every extra perf run. A test that measures a fused
+    // pattern must repeat the whole pattern, not only its last node, or the
+    // timing reports the tail op while the matrix product runs once.
+    virtual std::vector<ggml_tensor *> perf_dup_nodes(ggml_tensor * out) { return { out }; }
+
+    // Upper bound on the op repeats inside one graph, -1 means no cap. Repeating
+    // one node many times is not representative for a fused pattern that needs
+    // most of VTCM, so such tests ask for a small graph instead.
+    virtual int perf_max_runs() { return -1; }
     virtual std::vector<ggml_tensor *> fusion_test_nodes() { return {}; }
     virtual bool use_weight_context() { return false; }
 
@@ -1658,8 +1667,15 @@ struct test_case {
         }
 
         // duplicate the op
+        const int max_runs = perf_max_runs();
+        if (max_runs > 0 && n_runs > max_runs) {
+            n_runs = max_runs;
+        }
+        const std::vector<ggml_tensor *> dup_nodes = perf_dup_nodes(out);
         for (int i = 1; i < n_runs; i++) {
-            ggml_graph_add_node(gf, out);
+            for (ggml_tensor * t : dup_nodes) {
+                ggml_graph_add_node(gf, t);
+            }
         }
 
         // calculate memory
@@ -7238,6 +7254,7 @@ struct test_mul_mat_add : public test_case {
     const int64_t n;
     const int64_t k;
     const mul_mat_add_mode mode;
+    ggml_tensor * mm = nullptr; // set by build_graph, needed to repeat the pair in perf runs
 
     test_mul_mat_add(ggml_type type_a, int64_t m, int64_t n, int64_t k, mul_mat_add_mode mode = MUL_MAT_ADD_MM_RES)
         : type_a(type_a), m(m), n(n), k(k), mode(mode) {
@@ -7255,6 +7272,19 @@ struct test_mul_mat_add : public test_case {
 
     bool run_whole_graph() override { return true; }
 
+    // repeat the whole MUL_MAT + ADD pair, otherwise only the add is timed
+    std::vector<ggml_tensor *> perf_dup_nodes(ggml_tensor * out) override {
+        return mm != nullptr ? std::vector<ggml_tensor *>{ mm, out } : std::vector<ggml_tensor *>{ out };
+    }
+
+    // one fused op needs ~7 MiB of VTCM, so a long graph of copies only serialises
+    int perf_max_runs() override { return 1; }
+
+    uint64_t op_flops(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return 2 * m * n * k;
+    }
+
     double max_nmse_err() override {
         return 5e-4;
     }
@@ -7265,6 +7295,7 @@ struct test_mul_mat_add : public test_case {
         ggml_tensor * res = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, m, mode == MUL_MAT_ADD_ROW ? 1 : n);
 
         ggml_tensor * mm  = ggml_mul_mat(ctx, a, b);
+        this->mm = mm;
         ggml_tensor * out = nullptr;
         switch (mode) {
             case MUL_MAT_ADD_MM_RES:
@@ -10362,6 +10393,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
 
+    // 27B ffn_down fused MUL_MAT+ADD shapes (local correctness addition, phase 40)
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS}) {
+        test_cases.emplace_back(new test_mul_mat_add(type_a, 5120, 1, 17408, MUL_MAT_ADD_MM_RES));
+    }
+
     // m == 1, with n on both sides of MMVF_MAX_BATCH_SIZE (8): mmvf below, operand swap above
     for (int64_t n : {1, 7, 8, 9, 16, 127, 128, 511, 512}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 1, n, 2048, {1, 1}, {1, 1}));
@@ -11803,6 +11839,36 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     }
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33, 2,  768, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 33, 2, 1280, {1, 1}, {1, 1}));
+
+    // 27B decode shapes (m x k from the 19 IQ2_S tensors), local benchmark addition
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S}) {
+        for (auto mk : {std::pair<int64_t, int64_t>{17408, 5120}, {5120, 17408}, {12288, 5120}, {10240, 5120}, {6144, 5120}}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, 1, mk.second, {1, 1}, {1, 1}));
+        }
+    }
+
+    // 27B ssm_out (k=6144 m=5120) and attn_k/v (k=5120 m=1024) shapes, phase 39 addition
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S}) {
+        for (auto mk : {std::pair<int64_t, int64_t>{5120, 6144}, {1024, 5120}}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, 1, mk.second, {1, 1}, {1, 1}));
+        }
+    }
+
+    // the same shapes with the 5 activation rows one decode step of the 27B emits, phase 44 addition
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S}) {
+        for (auto mk : {std::pair<int64_t, int64_t>{17408, 5120}, {6144, 5120}, {1024, 5120}}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, mk.first, 5, mk.second, {1, 1}, {1, 1}));
+        }
+    }
+
+    // 27B ffn_down (k=17408 m=5120) as the fused MUL_MAT+ADD the graph actually emits, phase 39 addition
+    for (ggml_type type_a : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS}) {
+        test_cases.emplace_back(new test_mul_mat_add(type_a, 5120, 1, 17408, MUL_MAT_ADD_MM_RES));
+    }
+
+    // fused vs plain on a short contraction (k=1024): separates fixed cost from kernel cost, phase 40 diagnostic
+    test_cases.emplace_back(new test_mul_mat_add(GGML_TYPE_IQ2_S, 5120, 1, 1024, MUL_MAT_ADD_MM_RES));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ2_S, GGML_TYPE_F32, 5120, 1, 1024, {1, 1}, {1, 1}));
 
     // FWHT tests
     test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 128, 1, 128));

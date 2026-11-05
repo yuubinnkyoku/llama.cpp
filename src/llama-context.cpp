@@ -1404,6 +1404,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
+    const int64_t t_pu = ggml_time_us();
+
     auto * res = get_gf_res_prev();
     auto * gf  = res->get_gf();
 
@@ -1460,11 +1462,17 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    const int64_t t_compute = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    if (getenv("LLAMA_DECODE_TIMING")) {
+        LLAMA_LOG_INFO("llama-decode-timing setup_us %lld compute_us %lld\n",
+                       (long long) (t_compute - t_pu), (long long) (ggml_time_us() - t_compute));
     }
 
     ret = GGML_STATUS_SUCCESS;

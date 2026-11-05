@@ -1511,12 +1511,16 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
 
-    if (ml.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
+    bool prefetch_mmap = true;
+    if (ml.use_mmap) {
         for (const auto & dev : devices) {
             ggml_backend_dev_props props;
             ggml_backend_dev_get_props(dev.dev, &props);
             if (!props.caps.mmap_support) {
-                ml.use_mmap = false;
+                prefetch_mmap = false;
+                if (params.load_mode == LLAMA_LOAD_MODE_AUTO) {
+                    ml.use_mmap = false;
+                }
                 break;
             }
         }
@@ -1811,7 +1815,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // per-tensor activation precision policy
     prec_policy.load(ml, *this);
 
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    ml.init_mappings(prefetch_mmap, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
     // create the backend buffers

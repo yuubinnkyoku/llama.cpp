@@ -1430,7 +1430,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
 
             std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
                     lazy.for_file(idx));
-            mmaps_used.emplace_back(mapping->size(), 0);
+            mmaps_used.emplace_back();
             if (mlock_mmaps) {
                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());
                 mlock_mmap->init(mapping->addr());
@@ -1608,6 +1608,12 @@ bool llama_model_loader::load_all_data(
         tensors.push_back(cur);
     }
 
+    // P20_EARLY_SOURCE_RELEASE=1 drops the mmap pages of a tensor right after it
+    // has been copied into a backend buffer.
+    const bool release_source = use_mmap && getenv("P20_EARLY_SOURCE_RELEASE") != nullptr &&
+            atoi(getenv("P20_EARLY_SOURCE_RELEASE")) != 0;
+    size_t released_bytes = 0;
+
     // without mmap, tensors in non-host buffers are staged through a temporary buffer sized like the tensor
     // load them biggest-first so the largest staging buffer is allocated while the fewest weights are resident
     if (!use_mmap) {
@@ -1662,11 +1668,16 @@ bool llama_model_loader::load_all_data(
                     lmlock->grow_to(weight->offs + n_size);
                 }
 
-                auto & mmap_used = mmaps_used[weight->idx];
-                mmap_used.first  = std::min(mmap_used.first,  weight->offs);
-                mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
+                mmaps_used[weight->idx].emplace_back(weight->offs, weight->offs + n_size);
             } else {
                 ggml_backend_tensor_set(cur, data, 0, n_size);
+                // The tensor now lives in a backend buffer. Drop its file backed
+                // source pages so the load keeps at most one tensor of extra RAM.
+                if (release_source && !check_tensors) {
+                    unmap_weight(*weight);
+                    mmaps_used[weight->idx].emplace_back(weight->offs, weight->offs + n_size);
+                    released_bytes += n_size;
+                }
             }
         } else {
             const auto & file = files.at(weight->idx);
@@ -1777,13 +1788,23 @@ bool llama_model_loader::load_all_data(
         // unmap offloaded tensors and metadata
         if (use_mmap) {
             for (uint32_t idx = 0; idx < mappings.size(); idx++) {
-                const auto & mmap_used = mmaps_used.at(idx);
+                auto & mmap_used = mmaps_used.at(idx);
                 auto & mapping = mappings.at(idx);
-                mapping->unmap_fragment(0, mmap_used.first);
-                if (mmap_used.second != 0) {
-                    mapping->unmap_fragment(mmap_used.second, mapping->size());
+                std::sort(mmap_used.begin(), mmap_used.end());
+                size_t used_end = 0;
+                for (const auto & range : mmap_used) {
+                    // Keep mlocked mappings contiguous.
+                    if (range.first > used_end && (lmlocks == nullptr || used_end == 0)) {
+                        mapping->unmap_fragment(used_end, range.first);
+                    }
+                    used_end = std::max(used_end, range.second);
                 }
+                mapping->unmap_fragment(used_end, mapping->size());
             }
+        }
+        if (release_source) {
+            LLAMA_LOG_INFO("%s: released %.1f MiB of mmap source pages after copying to backend buffers\n",
+                    __func__, released_bytes / (1024.0 * 1024.0));
         }
         if (progress_callback) {
             // Even though the model is done loading, we still honor

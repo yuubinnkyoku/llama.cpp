@@ -80,13 +80,8 @@ static void work_queue_thread(void * context) {
             unsigned int i = me->id;
             if (i < n) {
                 task->func(n, i, task->data);
-
-                atomic_fetch_sub_explicit(&task->barrier, 1, memory_order_release);
-            } else {
-                while (atomic_load_explicit(&task->barrier, memory_order_relaxed) > 0) {
-                    hex_pause();
-                }
             }
+            atomic_fetch_sub_explicit(&task->barrier, 1, memory_order_release);
 
             ir = (ir + 1) & q->idx_mask;
         }
@@ -113,7 +108,8 @@ bool work_queue_run_async(work_queue_t q, work_queue_func_t func, void * data, u
     task->func      = func;
     task->data      = data;
     task->n_threads = n;
-    atomic_store_explicit(&task->barrier, n, memory_order_relaxed);
+    // All workers must observe this job before the queue entry can be reused.
+    atomic_store_explicit(&task->barrier, q->n_threads, memory_order_relaxed);
 
     atomic_store_explicit(&q->idx_write, (iw + 1) & q->idx_mask, memory_order_relaxed);
 

@@ -1809,10 +1809,22 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
 
     int prev_backend_id = -1;
 
+    // GGML_SCHED_SPLIT_TIMING=N logs per-split host time once every N graphs
+    const char * GGML_SCHED_SPLIT_TIMING = getenv("GGML_SCHED_SPLIT_TIMING");
+    const int split_timing_every = GGML_SCHED_SPLIT_TIMING ? atoi(GGML_SCHED_SPLIT_TIMING) : 0;
+    static std::vector<int64_t> split_us;
+    static std::vector<int32_t> split_calls;
+    static int split_graphs = 0;
+    if (split_timing_every > 0 && (int) split_us.size() < sched->n_splits) {
+        split_us.resize(sched->n_splits, 0);
+        split_calls.resize(sched->n_splits, 0);
+    }
+
     for (int split_id = 0; split_id < sched->n_splits; split_id++) {
         struct ggml_backend_sched_split * split = &splits[split_id];
         int split_backend_id = split->backend_id;
         ggml_backend_t split_backend = sched->backends[split_backend_id];
+        const int64_t t_split = split_timing_every > 0 ? ggml_time_us() : 0;
 
         // ensure the previous split's async work has completed before we start
         // this split, the allocator may have reused buffer regions across splits
@@ -1996,6 +2008,24 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
         }
 
         prev_backend_id = split_backend_id;
+
+        if (split_timing_every > 0) {
+            split_us[split_id] += ggml_time_us() - t_split;
+            split_calls[split_id]++;
+        }
+    }
+
+    if (split_timing_every > 0 && ++split_graphs % split_timing_every == 0) {
+        for (int i = 0; i < sched->n_splits; i++) {
+            if (split_calls[i] == 0) {
+                continue;
+            }
+            GGML_LOG_INFO("ggml-sched-split id %d backend %s nodes %d avg_us %lld calls %d\n", i,
+                          ggml_backend_name(sched->backends[splits[i].backend_id]), splits[i].graph.n_nodes,
+                          (long long) (split_us[i] / split_calls[i]), split_calls[i]);
+            split_us[i] = 0;
+            split_calls[i] = 0;
+        }
     }
 
     return GGML_STATUS_SUCCESS;

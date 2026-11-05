@@ -621,7 +621,27 @@ static inline uint32_t iq2_s_apply_sign4(uint32_t magnitude, uint32_t sign4) {
 
 // VTCM gather path: one 32-row word vector pair per group, built from the
 // copied codebook with Q6_vgather instead of scalar .rodata loads.
-static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restrict tile, int l, const uint64_t * grid, HVX_Vector * restrict scratch) {
+
+// Replace the two sign-LUT gathers with arithmetic. v_off4 holds 4*nibble per
+// lane; the 32-bit mask wants byte i = 0xFF when bit i of the nibble is set.
+static inline HVX_Vector iq2_s_sign_mask_arith(HVX_Vector v_off4) {
+    HVX_Vector m0 = Q6_V_vand_VV(v_off4, Q6_V_vsplat_R(0x04));
+    HVX_Vector m1 = Q6_V_vand_VV(v_off4, Q6_V_vsplat_R(0x08));
+    HVX_Vector m2 = Q6_V_vand_VV(v_off4, Q6_V_vsplat_R(0x10));
+    HVX_Vector m3 = Q6_V_vand_VV(v_off4, Q6_V_vsplat_R(0x20));
+    m0 = Q6_Vuw_vlsr_VuwR(m0, 2);
+    m1 = Q6_Vuw_vlsr_VuwR(m1, 3);
+    m2 = Q6_Vuw_vlsr_VuwR(m2, 4);
+    m3 = Q6_Vuw_vlsr_VuwR(m3, 5);
+    m0 = Q6_Vw_vsub_VwVw(Q6_Vw_vasl_VwR(m0, 8), m0);
+    m1 = Q6_Vw_vsub_VwVw(Q6_Vw_vasl_VwR(m1, 8), m1);
+    m2 = Q6_Vw_vsub_VwVw(Q6_Vw_vasl_VwR(m2, 8), m2);
+    m3 = Q6_Vw_vsub_VwVw(Q6_Vw_vasl_VwR(m3, 8), m3);
+    m1 = Q6_Vw_vasl_VwR(m1, 8);
+    m2 = Q6_Vw_vasl_VwR(m2, 16);
+    m3 = Q6_Vw_vasl_VwR(m3, 24);
+    return Q6_V_vor_VV(Q6_V_vor_VV(m0, m1), Q6_V_vor_VV(m2, m3));
+}static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restrict tile, int l, const uint64_t * grid, HVX_Vector * restrict scratch) {
     const uint32_t grid_rt = (uint32_t) (uintptr_t) grid;
     const uint32_t lut_rt  = grid_rt + IQ2S_GRID_BYTES;
     // vgather Mu is the byte offset of the last valid byte, not the region size.
@@ -651,16 +671,15 @@ static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restri
         Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
             Q6_Vub_vlsr_VubR(v_sign, 4))))), 2);
 
-    // 4 gathers land in this thread's VTCM scratch slot (512 B per thread)
+    // 2 grid gathers land in this thread's VTCM scratch slot (512 B per thread)
     Q6_vgather_ARMVw(&scratch[0], grid_rt, grid_mu, v_off);      // low 4 magnitudes
     Q6_vgather_ARMVw(&scratch[1], grid_rt, grid_mu, v_off_hi);   // high 4 magnitudes
-    Q6_vgather_ARMVw(&scratch[2], lut_rt, lut_mu, v_off_s0);
-    Q6_vgather_ARMVw(&scratch[3], lut_rt, lut_mu, v_off_s1);
 
     const HVX_Vector g0 = scratch[0];
     const HVX_Vector g1 = scratch[1];
-    const HVX_Vector n0 = scratch[2];
-    const HVX_Vector n1 = scratch[3];
+    // sign masks come from arithmetic, not from two LUT gathers
+    const HVX_Vector n0 = iq2_s_sign_mask_arith(v_off_s0);
+    const HVX_Vector n1 = iq2_s_sign_mask_arith(v_off_s1);
 
     const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
     const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g0, n0), Q6_V_vand_VV(n0, v_ones));
@@ -1115,19 +1134,28 @@ static void tiled_vec_dot_iq3_xxs_scalar_32x1(const uint32_t n, float * restrict
     }
 }
 
+// ksigns_iq2xs is linear over GF(2): bit b of the index sets byte bit b and
+// bit 7, so the byte is the index' low 7 bits plus the parity of the index.
+static inline HVX_Vector iq3_xxs_sign_mask_arith(HVX_Vector sign_index) {
+    HVX_Vector fold = Q6_V_vxor_VV(sign_index, Q6_Vuw_vlsr_VuwR(sign_index, 4));
+    fold = Q6_V_vxor_VV(fold, Q6_Vuw_vlsr_VuwR(fold, 2));
+    fold = Q6_V_vxor_VV(fold, Q6_Vuw_vlsr_VuwR(fold, 1));
+    const HVX_Vector parity = Q6_Vw_vasl_VwR(Q6_V_vand_VV(fold, Q6_V_vsplat_R(1)), 7);
+    return Q6_V_vor_VV(Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(0x7F)), parity);
+}
+
 static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, HVX_Vector aux, int l,
         const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
+    (void) signs;
     const HVX_Vector idx0 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l)))));
     const HVX_Vector idx1 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l + 32)))));
     const HVX_Vector sign_index = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(aux, 7 * l), Q6_V_vsplat_R(127));
-    const HVX_Vector sign_offset = Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(124));
 
     Q6_vgather_ARMVw(&scratch[0], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx0, 2));
     Q6_vgather_ARMVw(&scratch[1], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx1, 2));
-    Q6_vgather_ARMVw(&scratch[2], (uint32_t) (uintptr_t) signs, 127, sign_offset);
 
-    HVX_Vector shift = Q6_Vw_vasl_VwR(Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(3)), 3);
-    HVX_Vector sign = Q6_V_vand_VV(Q6_Vw_vlsr_VwVw(scratch[2], shift), Q6_V_vsplat_R(255));
+    // the sign mask comes from arithmetic, not from a table gather
+    HVX_Vector sign = iq3_xxs_sign_mask_arith(sign_index);
     sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 8));
     sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 16));
     const HVX_VectorPred neg0 = Q6_Q_vcmp_gt_VubVub(Q6_V_vand_VV(sign, Q6_V_vsplat_R(0x08040201)), Q6_V_vzero());

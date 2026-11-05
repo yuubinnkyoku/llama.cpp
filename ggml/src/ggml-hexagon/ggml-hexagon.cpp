@@ -576,6 +576,13 @@ struct ggml_hexagon_session {
     std::atomic<uint64_t> batch_rsp_seq{0};
     std::atomic<uint32_t> last_error{HTP_STATUS_OK};
 
+    // Phase 44 timeline: host time spent pushing batches and blocked on replies,
+    // reset at every synchronize so one line describes one HTP split.
+    uint64_t tl_submit_us = 0;
+    uint64_t tl_wait_us   = 0;
+    uint32_t tl_batches   = 0;
+    uint32_t tl_ops       = 0;
+
     uint64_t                cached_uid = 0;
     std::vector<htp_opnode> cached_nodes;
 
@@ -4665,7 +4672,17 @@ void ggml_hexagon_session::flush_async() {
     flush_batch();
 }
 
+static bool opt_timeline = false;
+
+// Monotonic microseconds. Same clock the rest of the backend uses, so the
+// numbers are comparable with the profile-op usec column.
+static inline uint64_t hex_now_us() {
+    return (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void ggml_hexagon_session::flush_pending(bool all) {
+    const uint64_t tl_t0 = opt_timeline ? hex_now_us() : 0;
     for (auto & sub : this->mdev.sessions) {
         sub->flush_pending(all);
         if (sub->last_error > HTP_STATUS_OK) {
@@ -4713,6 +4730,10 @@ void ggml_hexagon_session::flush_pending(bool all) {
 
         if (!all) break;
     }
+
+    if (opt_timeline) {
+        this->tl_wait_us += hex_now_us() - tl_t0;
+    }
 }
 
 void ggml_hexagon_session::flush_sync(bool all) {
@@ -4730,6 +4751,7 @@ void ggml_hexagon_session::flush_batch(size_t min_ops) {
     if (op_batch->n_ops < min_ops) { return; }
 
     op_batch->sort_buffers();
+    const uint64_t tl_t0 = opt_timeline ? hex_now_us() : 0;
 
     htp_opbatch_req req {};
     dspqueue_buffer dbuf{};
@@ -4771,6 +4793,12 @@ void ggml_hexagon_session::flush_batch(size_t min_ops) {
     }
 
     op_batch->reset();
+
+    if (opt_timeline) {
+        this->tl_submit_us += hex_now_us() - tl_t0;
+        this->tl_batches++;
+        this->tl_ops += (uint32_t) req.n_ops;
+    }
 }
 
 void ggml_hexagon_session::enqueue_op(const htp_opnode & node) {
@@ -8136,6 +8164,18 @@ static void ggml_backend_hexagon_synchronize(ggml_backend_t backend) {
     if (sess->last_error > HTP_STATUS_OK) {
         GGML_ABORT("ggml-hex: %s synchronize failed : dsp-error %s\n", sess->c_name(), status_to_str(sess->last_error));
     }
+
+    if (opt_timeline) {
+        // One line per HTP split: how long the host spent pushing batches and
+        // how long it was blocked on replies, plus the batch and op count.
+        GGML_LOG_DEBUG("ggml-hex: %s timeline t_ms %llu batches %u ops %u submit_us %llu wait_us %llu\n",
+                       sess->c_name(), (unsigned long long) (hex_now_us() / 1000), sess->tl_batches, sess->tl_ops,
+                       (unsigned long long) sess->tl_submit_us, (unsigned long long) sess->tl_wait_us);
+        sess->tl_submit_us = 0;
+        sess->tl_wait_us   = 0;
+        sess->tl_batches   = 0;
+        sess->tl_ops       = 0;
+    }
 }
 
 enum ggml_hexagon_mem_range_type {
@@ -9476,6 +9516,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     const char * str_opfusion = getenv("GGML_HEXAGON_OPFUSION");
     const char * str_opfilter = getenv("GGML_HEXAGON_OPFILTER");
     const char * str_profile  = getenv("GGML_HEXAGON_PROFILE");
+    const char * str_timeline = getenv("GGML_HEXAGON_TIMELINE");
     const char * str_etm      = getenv("GGML_HEXAGON_ETM");
     const char * str_nhvx     = getenv("GGML_HEXAGON_NHVX");
     const char * str_nhmx     = getenv("GGML_HEXAGON_NHMX");
@@ -9529,6 +9570,7 @@ static void ggml_hexagon_init(ggml_backend_reg * reg) {
     opt_opfilter  = str_opfilter ? new std::regex(str_opfilter, RE_ICASE) : NULL;
     opt_verbose   = str_verbose  ? atoi(str_verbose)                      : 0;
     opt_opbatch   = str_opbatch  ? strtoul(str_opbatch, NULL, 0)          : opt_opbatch;
+    opt_timeline  = str_timeline ? atoi(str_timeline) != 0                : opt_timeline;
     opt_opqueue   = str_opqueue  ? strtoul(str_opqueue, NULL, 0)          : opt_opqueue;
     opt_optrace   = str_optrace  ? strtoul(str_optrace, NULL, 0)          : (opt_opbatch * 256);
     opt_oppoll    = str_oppoll   ? strtoul(str_oppoll,  NULL, 0)          : opt_oppoll;
