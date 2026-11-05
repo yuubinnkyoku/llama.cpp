@@ -18,6 +18,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <regex>
+#include <map>
 #include <queue>
 #include <deque>
 #include <algorithm>
@@ -47,6 +48,7 @@
 
 #define GGML_COMMON_IMPL_CPP
 #include "ggml-backend-impl.h"
+#include "ggml-cpu.h"
 #include "ggml-common.h"
 #include "ggml-hexagon.h"
 #include "ggml-impl.h"
@@ -8002,6 +8004,155 @@ static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tens
     return true;
 }
 
+// Phase 46: split one MUL_MAT between the host and the DSP.
+//
+// The HTP backend enqueues ops and returns; the wait happens in synchronize.
+// So the DSP half can be submitted, the CPU half computed on the host, and the
+// DSP keeps running while the rest of the graph is prepared. A view of the
+// weight is enough because add_tensor() turns every address into an offset from
+// the buffer base, so no copy is needed for the DSP share either.
+//
+// Enabled with GGML_HEXAGON_SPLIT=1. The node must be a one column MUL_MAT
+// (decode); the split is a row count on the weight's second dimension, which is
+// the output's first dimension.
+struct hex_split_plan {
+    ggml_context *               ctx = nullptr;
+    ggml_cgraph *                gf  = nullptr;
+    int                          r   = 0;
+    ggml_tensor                  w_dsp {};
+    ggml_tensor                  y_dsp {};
+    std::unique_ptr<htp_opnode>  dsp;
+};
+
+static bool hex_split_enabled() {
+    static const bool on = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT");
+        return e && atoi(e) != 0;
+    }();
+    return on;
+}
+
+static const std::regex * hex_split_filter() {
+    static const std::regex * re = []() -> const std::regex * {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_FILTER");
+        if (!e || !*e) {
+            e = "ffn_(up|gate)";
+        }
+        return new std::regex(e, std::regex::icase);
+    }();
+    return re;
+}
+
+static int hex_split_cpu_rows(int64_t m) {
+    static const int    nrows = []() { const char * e = getenv("GGML_HEXAGON_SPLIT_CPU_ROWS"); return e ? atoi(e) : 0; }();
+    static const double frac  = []() { const char * e = getenv("GGML_HEXAGON_SPLIT_CPU_FRAC"); return e ? atof(e) : 0.5; }();
+    int64_t r = nrows > 0 ? nrows : (int64_t) (frac * (double) m + 0.5);
+    if (r < 1) { r = 1; }
+    if (r > m - 1) { r = m - 1; }
+    return (int) r;
+}
+
+static ggml_backend_t hex_split_cpu_backend() {
+    static ggml_backend_t be = []() -> ggml_backend_t {
+        ggml_backend_t b = ggml_backend_cpu_init();
+        if (b) {
+            const char * e = getenv("GGML_HEXAGON_SPLIT_THREADS");
+            const int    n = e ? atoi(e) : 6;
+            if (n > 0) {
+                ggml_backend_cpu_set_n_threads(b, n);
+            }
+        }
+        return b;
+    }();
+    return be;
+}
+
+// weight rows [first, first + nrows) of a 2D quantized tensor
+static void hex_split_slice_w(ggml_tensor * dst, const ggml_tensor * t, int64_t first, int64_t nrows) {
+    *dst = *t;
+    dst->data  = (char *) t->data + first * t->nb[1];
+    dst->ne[0] = t->ne[0];
+    dst->ne[1] = nrows;
+    dst->nb[2] = t->nb[1] * nrows;
+    dst->nb[3] = dst->nb[2] * t->ne[2];
+}
+
+// output rows [first, first + nrows) of a [m, 1] result
+static void hex_split_slice_y(ggml_tensor * dst, const ggml_tensor * t, int64_t first, int64_t nrows) {
+    *dst = *t;
+    dst->data  = (char *) t->data + first * t->nb[0];
+    dst->ne[0] = nrows;
+}
+
+static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
+    static std::map<const ggml_tensor *, hex_split_plan> plans;
+
+    auto it = plans.find(op);
+    if (it != plans.end()) {
+        return &it->second;
+    }
+
+    const ggml_tensor * w = op->src[0];
+    const ggml_tensor * x = op->src[1];
+    const int64_t       m = w->ne[1];
+    const int           r = hex_split_cpu_rows(m);
+
+    hex_split_plan plan;
+    plan.r = r;
+
+    ggml_init_params ip = { 4u * 1024u * 1024u, nullptr, true };
+    plan.ctx = ggml_init(ip);
+    if (!plan.ctx) {
+        return nullptr;
+    }
+    ggml_tensor * w_cpu = ggml_new_tensor_2d(plan.ctx, w->type, w->ne[0], r);
+    ggml_tensor * x_cpu = ggml_new_tensor_2d(plan.ctx, x->type, x->ne[0], x->ne[1]);
+    ggml_tensor * y_cpu = ggml_mul_mat(plan.ctx, w_cpu, x_cpu);
+    // the CPU share writes r contiguous floats at the head of the output, so
+    // only the input strides have to match the original tensors
+    if (w_cpu->nb[1] != w->nb[1] || x_cpu->nb[1] != x->nb[1] || y_cpu->nb[0] != op->nb[0]) {
+        GGML_LOG_ERROR("ggml-hex: split strides do not match for %s (w %zu/%zu x %zu/%zu y %zu/%zu)\n",
+                op->name, w_cpu->nb[1], w->nb[1], x_cpu->nb[1], x->nb[1], y_cpu->nb[1], op->nb[1]);
+        return nullptr;
+    }
+    w_cpu->data = w->data;
+    x_cpu->data = x->data;
+    y_cpu->data = op->data;
+    plan.gf = ggml_new_graph_custom(plan.ctx, 64, false);
+    ggml_build_forward_expand(plan.gf, y_cpu);
+
+    hex_split_slice_w(&plan.w_dsp, w, r, m - r);
+    hex_split_slice_y(&plan.y_dsp, op, r, m - r);
+    plan.y_dsp.src[0] = &plan.w_dsp;
+    plan.y_dsp.src[1] = op->src[1];
+
+    hex_split_plan & ref = plans.emplace(op, std::move(plan)).first->second;
+    ref.dsp = std::make_unique<htp_opnode>(HTP_OP_INVALID, &ref.y_dsp);
+    return &ref;
+}
+
+static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode & node,
+                                 hex_split_plan * plan, const struct htp_mm_kernel_params * params) {
+    ggml_backend_t cpu_be = hex_split_cpu_backend();
+    if (!cpu_be) {
+        return GGML_STATUS_FAILED;
+    }
+
+    memcpy(plan->dsp->kernel_params, params, sizeof(*params));
+    plan->dsp->opcode = HTP_OP_MUL_MAT;
+
+    // 1. submit the DSP share and let it run
+    sess->enqueue_op(*plan->dsp);
+    sess->flush_async();
+
+    // 2. compute the CPU share while the DSP works
+    if (ggml_backend_graph_compute(cpu_be, plan->gf) != GGML_STATUS_SUCCESS) {
+        return GGML_STATUS_FAILED;
+    }
+
+    return GGML_STATUS_SUCCESS;
+}
+
 static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, ggml_cgraph * graph) {
     auto sess = static_cast<ggml_hexagon_session *>(backend->context);
 
@@ -8035,7 +8186,7 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
     std::vector<htp_opnode> computed_nodes;
 
     // Check for cache hit
-    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid);
+    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid && !hex_split_enabled());
     if (cache_hit) {
         nodes_ptr = &sess->cached_nodes;
     } else {
@@ -8143,7 +8294,17 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
     }
 
     // Queue and execute
+    const bool split_on = hex_split_enabled();
     for (const auto & node : *nodes_ptr) {
+        if (split_on && node.opcode == HTP_OP_MUL_MAT && node.node->ne[1] == 1 && node.node->src[0] &&
+                node.node->src[0]->ne[1] > 2 && std::regex_search(node.node->name, *hex_split_filter())) {
+            hex_split_plan * plan = hex_split_plan_get(node.node);
+            if (plan && hex_split_run(sess, node, plan,
+                        (const struct htp_mm_kernel_params *) node.kernel_params) == GGML_STATUS_SUCCESS) {
+                continue;
+            }
+            GGML_LOG_ERROR("ggml-hex: split failed for %s, using the DSP alone\n", node.node->name);
+        }
         sess->enqueue_op(node);
     }
 
@@ -8766,6 +8927,12 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev, struct
 
 static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(ggml_backend_dev_t dev) {
     auto dev_ctx = static_cast<ggml_backend_hexagon_device_context *>(dev->context);
+    // Phase 46: a split MUL_MAT is computed by the host and the DSP, so the
+    // tensors of an HTP split must be host readable. host_buffer_type is still
+    // DMA-able by the DSP.
+    if (hex_split_enabled()) {
+        return &dev_ctx->host_buffer_type;
+    }
     return &dev_ctx->buffer_type;
 }
 
