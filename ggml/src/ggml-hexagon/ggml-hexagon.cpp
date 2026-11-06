@@ -9130,6 +9130,13 @@ static void ggml_hexagon_event_synchronize(ggml_backend_dev_t dev, ggml_hexagon_
         }
         std::this_thread::yield();
     }
+
+    // The scheduler waits for a graph through fences, not through synchronize(),
+    // so the split dump of the non-split reference run is written here.
+    if (hex_split_dump_pending) {
+        hex_split_dump_pending = false;
+        hex_split_dump_write(hex_split_dump_tensor);
+    }
 }
 
 static void ggml_backend_hexagon_device_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event) {
