@@ -2903,7 +2903,12 @@ static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t 
     }
 }
 
-static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+// Phase 46: the first complete write of a split weight also builds the compact
+// DSP share and the host share. Defined with the rest of the split code below.
+static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * tensor,
+                              const void * data, size_t offset, size_t size);
+
+static void ggml_backend_hexagon_buffer_set_tensor_impl(ggml_backend_buffer_t buffer,
                                                    ggml_tensor *         tensor,
                                                    const void *          data,
                                                    size_t                offset,
@@ -2970,6 +2975,15 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
         extra->shadow_buf.shrink_to_fit();
         extra->shadow_size = 0;
     }
+}
+
+static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
+                                                   ggml_tensor *         tensor,
+                                                   const void *          data,
+                                                   size_t                offset,
+                                                   size_t                size) {
+    ggml_backend_hexagon_buffer_set_tensor_impl(buffer, tensor, data, offset, size);
+    hex_split_capture(buffer, tensor, data, offset, size);
 }
 
 static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
@@ -8005,28 +8019,50 @@ static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tens
     return true;
 }
 
-// Phase 46: split one MUL_MAT between the host and the DSP.
+// Phase 46: split one MUL_MAT by rows between the host and the DSP.
 //
-// The HTP backend enqueues ops and returns; the wait happens in synchronize.
-// So the DSP half can be submitted, the CPU half computed on the host, and the
-// DSP keeps running while the rest of the graph is prepared. A view of the
-// weight is enough because add_tensor() turns every address into an offset from
-// the buffer base, so no copy is needed for the DSP share either.
+// A repack type in an HTP buffer is stored in the DSP tile layout, so a row view
+// of it is not a row view of the GGUF tensor. The DSP share therefore gets its
+// own compact tensor, filled from the GGUF rows [r, m) once at load time, and
+// the host share keeps the GGUF rows [0, r) in plain memory.
 //
-// Enabled with GGML_HEXAGON_SPLIT=1. The node must be a one column MUL_MAT
-// (decode); the split is a row count on the weight's second dimension, which is
-// the output's first dimension.
+// Enabled with GGML_HEXAGON_SPLIT=1 for the tensor names listed in
+// GGML_HEXAGON_SPLIT_WEIGHTS (default: blk.0.ffn_up.weight). The node must be a
+// one column MUL_MAT (decode); the split is a row count on the weight's second
+// dimension, which is the output's first dimension.
+struct hex_split_weight {
+    std::string           name;
+    ggml_context *        ctx       = nullptr;
+    ggml_tensor *         dsp       = nullptr;
+    ggml_backend_buffer_t buf       = nullptr;
+    std::vector<uint8_t>  host;           // GGUF rows [0, r), row layout
+    int64_t               k         = 0;
+    int64_t               m         = 0;
+    int64_t               r         = 0;
+    size_t                row_bytes = 0;
+    bool                  ready     = false;
+};
+
+static std::map<std::string, hex_split_weight> & hex_split_weights() {
+    static std::map<std::string, hex_split_weight> weights;
+    return weights;
+}
+
 struct hex_split_plan {
-    ggml_context *               ctx = nullptr;
-    ggml_cgraph *                gf  = nullptr;
-    int                          r   = 0;
-    ggml_tensor                  w_dsp {};
-    ggml_tensor                  y_dsp {};
-    std::unique_ptr<htp_opnode>  dsp;
-    uint8_t *                    cpu_w = nullptr;
-    const void *                 cpu_w_src = nullptr;
+    ggml_context *               ctx   = nullptr;
+    ggml_cgraph *                gf    = nullptr;
+    hex_split_weight *           w     = nullptr;
     ggml_tensor *                x_cpu = nullptr;
     ggml_tensor *                y_cpu = nullptr;
+    ggml_tensor                  y_dsp {};
+    std::unique_ptr<htp_opnode>  dsp;
+    // diagnostic only: the same host share computed a second time into its own
+    // buffer, to prove that the plan points at the right bytes
+    ggml_context *               ctx_ref = nullptr;
+    ggml_cgraph *                gf_ref  = nullptr;
+    ggml_tensor *                x_ref   = nullptr;
+    ggml_tensor *                y_ref   = nullptr;
+    std::vector<float>           ref_buf;
 };
 
 static bool hex_split_enabled() {
@@ -8037,15 +8073,42 @@ static bool hex_split_enabled() {
     return on;
 }
 
-static const std::regex * hex_split_filter() {
-    static const std::regex * re = []() -> const std::regex * {
-        const char * e = getenv("GGML_HEXAGON_SPLIT_FILTER");
-        if (!e || !*e) {
-            e = "ffn_(up|gate)";
-        }
-        return new std::regex(e, std::regex::icase);
+// Sequential keeps the CPU share before the DSP share, for the correctness gate.
+static bool hex_split_sequential() {
+    static const bool on = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_SEQ");
+        return e && atoi(e) != 0;
     }();
-    return re;
+    return on;
+}
+
+static bool hex_split_weight_match(const char * name) {
+    static const std::vector<std::string> names = []() {
+        std::vector<std::string> v;
+        const char * e = getenv("GGML_HEXAGON_SPLIT_WEIGHTS");
+        if (!e || !*e) {
+            e = "blk.0.ffn_up.weight";
+        }
+        const std::string s(e);
+        size_t p = 0;
+        while (p < s.size()) {
+            size_t q = s.find(',', p);
+            if (q == std::string::npos) {
+                q = s.size();
+            }
+            if (q > p) {
+                v.push_back(s.substr(p, q - p));
+            }
+            p = q + 1;
+        }
+        return v;
+    }();
+    for (const auto & n : names) {
+        if (n == name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static int hex_split_cpu_rows(int64_t m) {
@@ -8079,14 +8142,171 @@ static ggml_backend_t hex_split_cpu_backend() {
     }();
     return be;
 }
-// weight rows [first, first + nrows) of a 2D quantized tensor
-static void hex_split_slice_w(ggml_tensor * dst, const ggml_tensor * t, int64_t first, int64_t nrows) {
-    *dst = *t;
-    dst->data  = (char *) t->data + first * t->nb[1];
-    dst->ne[0] = t->ne[0];
-    dst->ne[1] = nrows;
-    dst->nb[2] = t->nb[1] * nrows;
-    dst->nb[3] = dst->nb[2] * t->ne[2];
+// Build the two shares of a split weight. Runs on the first complete write of
+// the tensor, before any DSP op refers to it, so the compact DSP tensor gets the
+// weights usage before its first mapping and set_tensor tiles it.
+static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, const void * data,
+                              size_t offset, size_t size) {
+    if (!hex_split_enabled() || !data) {
+        return;
+    }
+    if (!hex_split_weight_match(t->name)) {
+        return;
+    }
+    if (offset != 0 || size != ggml_nbytes(t) || t->view_src) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: offset %zu size %zu nbytes %zu view %d\n",
+                t->name, offset, size, ggml_nbytes(t), t->view_src ? 1 : 0);
+        return;
+    }
+    if (ggml_backend_buffer_get_usage(buffer) != GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: buffer usage %d\n", t->name,
+                (int) ggml_backend_buffer_get_usage(buffer));
+        return;
+    }
+    if (t->type != GGML_TYPE_IQ2_S || t->ne[2] != 1 || t->ne[3] != 1) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: type %s ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 "\n",
+                t->name, ggml_type_name(t->type), t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
+        return;
+    }
+    if (t->ne[1] < 64) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: only %" PRId64 " rows\n", t->name, t->ne[1]);
+        return;
+    }
+
+    auto & weights = hex_split_weights();
+    if (weights.find(t->name) != weights.end()) {
+        return;
+    }
+
+    const int64_t     k         = t->ne[0];
+    const int64_t     m         = t->ne[1];
+    const int64_t     r         = hex_split_cpu_rows(m);
+    const size_t      row_bytes = ggml_row_size(t->type, k);
+    const size_t      nbytes    = row_bytes * (size_t) m;
+    const size_t      host_bytes = row_bytes * (size_t) r;
+    const size_t      dsp_bytes  = row_bytes * (size_t) (m - r);
+    const uint8_t *   src        = (const uint8_t *) data;
+
+    if (nbytes != ggml_nbytes(t) || host_bytes >= nbytes || m - r < 2) {
+        GGML_LOG_ERROR("ggml-hex: split %s rejected: row %zu x %" PRId64 " against nbytes %zu, r %" PRId64 "\n",
+                t->name, row_bytes, m, ggml_nbytes(t), r);
+        return;
+    }
+
+    hex_split_weight w;
+    w.name      = t->name;
+    w.k         = k;
+    w.m         = m;
+    w.r         = r;
+    w.row_bytes = row_bytes;
+
+    // host share: plain memory, read by the CPU share on every token
+    w.host.assign(src, src + host_bytes);
+
+    // dsp share: own compact tensor, own buffer, weights usage before the first map
+    ggml_init_params ip = { 1024u * 1024u, nullptr, true };
+    w.ctx = ggml_init(ip);
+    ggml_tensor * dsp = w.ctx ? ggml_new_tensor_2d(w.ctx, t->type, k, m - r) : nullptr;
+    if (dsp) {
+        const std::string dname = w.name + ".dsp";
+        ggml_set_name(dsp, dname.c_str());
+        w.buf = ggml_backend_alloc_ctx_tensors_from_buft(w.ctx, ggml_backend_buffer_get_type(buffer));
+    }
+    if (!w.buf) {
+        GGML_LOG_ERROR("ggml-hex: split %s rejected: cannot allocate the DSP share\n", t->name);
+        if (w.ctx) { ggml_free(w.ctx); }
+        return;
+    }
+    ggml_backend_buffer_set_usage(w.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    ggml_backend_tensor_set(dsp, src + host_bytes, 0, dsp_bytes);
+
+    // readback: the tiled store must reproduce the GGUF rows exactly
+    std::vector<uint8_t> check(dsp_bytes);
+    ggml_backend_tensor_get(dsp, check.data(), 0, dsp_bytes);
+    size_t ndiff = 0;
+    size_t first = (size_t) -1;
+    for (size_t i = 0; i < dsp_bytes; i++) {
+        if (check[i] != src[host_bytes + i]) {
+            if (first == (size_t) -1) { first = i; }
+            ndiff++;
+        }
+    }
+
+    const size_t off_in_buf = (size_t) ((const uint8_t *) dsp->data - (const uint8_t *) ggml_backend_buffer_get_base(w.buf));
+    const size_t buf_size   = ggml_backend_buffer_get_size(w.buf);
+    const bool   in_buf     = off_in_buf + dsp_bytes <= buf_size;
+
+    GGML_LOG_INFO("ggml-hex: split weight %s: k %" PRId64 " m %" PRId64 " host rows %" PRId64
+            " dsp rows %" PRId64 " row %zu B, host %.2f MiB, dsp %.2f MiB in %.2f MiB at off %zu"
+            " usage %d, r mod 32 %" PRId64 ", readback ndiff %zu first %zd, in buf %d\n",
+            t->name, k, m, r, m - r, row_bytes,
+            (double) host_bytes / (1024.0 * 1024.0), (double) dsp_bytes / (1024.0 * 1024.0),
+            (double) buf_size / (1024.0 * 1024.0), off_in_buf,
+            (int) ggml_backend_buffer_get_usage(w.buf), r % 32, ndiff,
+            first == (size_t) -1 ? (ptrdiff_t) -1 : (ptrdiff_t) first, (int) in_buf);
+
+    if (ndiff != 0 || !in_buf) {
+        GGML_LOG_ERROR("ggml-hex: split %s rejected: readback ndiff %zu in buf %d\n", t->name, ndiff, (int) in_buf);
+        ggml_backend_buffer_free(w.buf);
+        ggml_free(w.ctx);
+        return;
+    }
+
+    w.dsp   = dsp;
+    w.ready = true;
+    weights.emplace(w.name, std::move(w));
+}
+
+// Diagnostic dumps for the split gate. GGML_HEXAGON_SPLIT_DUMP names a file that
+// receives one record per step: "C46D", step, count, then the raw F32 rows of the
+// split MUL_MAT output. A run with GGML_HEXAGON_SPLIT=0 writes the full tensor HTP
+// reference to the same format, so the two files can be compared byte by byte.
+static const char * hex_split_dump_path() {
+    static const char * p = []() -> const char * {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_DUMP");
+        return e && *e ? e : nullptr;
+    }();
+    return p;
+}
+
+static const ggml_tensor * hex_split_dump_tensor  = nullptr;
+static bool                hex_split_dump_pending = false;
+static uint32_t            hex_split_dump_step    = 0;
+
+static void hex_split_dump_write(const ggml_tensor * t) {
+    const char * path = hex_split_dump_path();
+    if (!path || !t) {
+        return;
+    }
+    const size_t       n = (size_t) ggml_nelements(t);
+    std::vector<float> buf(n);
+    ggml_backend_tensor_get((ggml_tensor *) t, buf.data(), 0, n * sizeof(float));
+
+    size_t nfinite = 0, nsentinel = 0;
+    float  vmin = buf.empty() ? 0.0f : buf[0];
+    float  vmax = vmin;
+    for (float v : buf) {
+        if (std::isfinite(v)) { nfinite++; }
+        if (v == -12345.0f)   { nsentinel++; }
+        vmin = std::min(vmin, v);
+        vmax = std::max(vmax, v);
+    }
+
+    FILE * f = fopen(path, "ab");
+    if (!f) {
+        GGML_LOG_ERROR("ggml-hex: split dump cannot open %s\n", path);
+        return;
+    }
+    const uint32_t step = hex_split_dump_step++;
+    const uint32_t cnt  = (uint32_t) n;
+    fwrite("C46D", 1, 4, f);
+    fwrite(&step, sizeof(step), 1, f);
+    fwrite(&cnt,  sizeof(cnt),  1, f);
+    fwrite(buf.data(), sizeof(float), n, f);
+    fclose(f);
+
+    GGML_LOG_INFO("ggml-hex: split dump %s step %u floats %zu finite %zu sentinel %zu min %.6f max %.6f\n",
+            path, step, n, nfinite, nsentinel, (double) vmin, (double) vmax);
 }
 
 // output rows [first, first + nrows) of a [m, 1] result
@@ -8099,43 +8319,56 @@ static void hex_split_slice_y(ggml_tensor * dst, const ggml_tensor * t, int64_t 
 static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
     static std::map<std::string, hex_split_plan> plans;
 
-    auto it = plans.find(op->name);
+    const ggml_tensor * w_in = op->src[0];
+    if (!w_in || !w_in->buffer) {
+        return nullptr;
+    }
+    auto & weights = hex_split_weights();
+    auto   wit     = weights.find(w_in->name);
+    if (wit == weights.end() || !wit->second.ready) {
+        return nullptr;
+    }
+    hex_split_weight & w = wit->second;
+
+    if (op->type != GGML_TYPE_F32 || op->ne[1] != 1 || op->ne[2] != 1 || op->ne[3] != 1) {
+        return nullptr;
+    }
+    if (w_in->ne[0] != w.k || w_in->ne[1] != w.m) {
+        return nullptr;
+    }
+    // the DSP writes the tail of the output, so the output must be device memory
+    if (!op->buffer || ggml_backend_buffer_is_host(op->buffer)) {
+        GGML_LOG_ERROR("ggml-hex: split %s: output is not in device memory, not splitting\n", w.name.c_str());
+        return nullptr;
+    }
+
+    auto it = plans.find(w.name);
     if (it != plans.end()) {
         return &it->second;
     }
 
-    const ggml_tensor * w = op->src[0];
-    const ggml_tensor * x = op->src[1];
-    const int64_t       m = w->ne[1];
-    const int           r = hex_split_cpu_rows(m);
-
     hex_split_plan plan;
-    plan.r = r;
+    plan.w = &w;
 
-    ggml_init_params ip = { 4u * 1024u * 1024u, nullptr, true };
+    ggml_init_params ip = { 1024u * 1024u, nullptr, true };
     plan.ctx = ggml_init(ip);
     if (!plan.ctx) {
         return nullptr;
     }
-    ggml_tensor * w_cpu = ggml_new_tensor_2d(plan.ctx, w->type, w->ne[0], r);
-    ggml_tensor * x_cpu = ggml_new_tensor_2d(plan.ctx, x->type, x->ne[0], x->ne[1]);
-    ggml_tensor * y_cpu = ggml_mul_mat(plan.ctx, w_cpu, x_cpu);
+
+    ggml_tensor *       x     = op->src[1];
+    ggml_tensor *       w_cpu = ggml_new_tensor_2d(plan.ctx, w_in->type, w.k, w.r);
+    ggml_tensor *       x_cpu = ggml_new_tensor_2d(plan.ctx, x->type, x->ne[0], x->ne[1]);
+    ggml_tensor *       y_cpu = ggml_mul_mat(plan.ctx, w_cpu, x_cpu);
     // the CPU share writes r contiguous floats at the head of the output, so
     // only the input strides have to match the original tensors
-    if (w_cpu->nb[1] != w->nb[1] || x_cpu->nb[1] != x->nb[1] || y_cpu->nb[0] != op->nb[0]) {
+    if (w_cpu->nb[1] != w.row_bytes || x_cpu->nb[1] != x->nb[1] || y_cpu->nb[0] != op->nb[0]) {
         GGML_LOG_ERROR("ggml-hex: split strides do not match for %s (w %zu/%zu x %zu/%zu y %zu/%zu)\n",
-                op->name, w_cpu->nb[1], w->nb[1], x_cpu->nb[1], x->nb[1], y_cpu->nb[1], op->nb[1]);
+                w.name.c_str(), w_cpu->nb[1], w.row_bytes, x_cpu->nb[1], x->nb[1], y_cpu->nb[0], op->nb[0]);
+        ggml_free(plan.ctx);
         return nullptr;
     }
-    // the host share must read cached RAM: fastrpc memory is about 100x slower to read
-    const size_t cpu_bytes = ggml_row_size(w->type, w->ne[0]) * (size_t) r;
-    plan.cpu_w_src = w->data;
-    plan.cpu_w = (uint8_t *) malloc(cpu_bytes);
-    if (!plan.cpu_w) {
-        return nullptr;
-    }
-    memcpy(plan.cpu_w, w->data, cpu_bytes);
-    w_cpu->data = plan.cpu_w;
+    w_cpu->data = w.host.data();
     x_cpu->data = x->data;
     y_cpu->data = op->data;
     plan.x_cpu = x_cpu;
@@ -8143,21 +8376,42 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
     plan.gf = ggml_new_graph_custom(plan.ctx, 64, false);
     ggml_build_forward_expand(plan.gf, y_cpu);
 
-    hex_split_slice_w(&plan.w_dsp, w, r, m - r);
-    hex_split_slice_y(&plan.y_dsp, op, r, m - r);
-    plan.y_dsp.src[0] = &plan.w_dsp;
-    plan.y_dsp.src[1] = op->src[1];
+    // diagnostic: a second host share in its own buffer, from the same bytes
+    if (hex_split_dump_path()) {
+        plan.ctx_ref = ggml_init(ip);
+        if (plan.ctx_ref) {
+            ggml_tensor * w_ref = ggml_new_tensor_2d(plan.ctx_ref, w_in->type, w.k, w.r);
+            ggml_tensor * x_ref = ggml_new_tensor_2d(plan.ctx_ref, x->type, x->ne[0], x->ne[1]);
+            ggml_tensor * y_ref = ggml_mul_mat(plan.ctx_ref, w_ref, x_ref);
+            plan.ref_buf.assign((size_t) w.r, 0.0f);
+            w_ref->data = w.host.data();
+            x_ref->data = x->data;
+            y_ref->data = plan.ref_buf.data();
+            plan.x_ref  = x_ref;
+            plan.y_ref  = y_ref;
+            plan.gf_ref = ggml_new_graph_custom(plan.ctx_ref, 64, false);
+            ggml_build_forward_expand(plan.gf_ref, y_ref);
+        }
+    }
 
-    GGML_LOG_INFO("ggml-hex: split %s: cpu rows %d of %" PRId64 " (dsp rows %" PRId64 "), weight %zu MiB\n",
-            op->name, r, m, m - r, ggml_nbytes(w) / (1024u * 1024u));
+    hex_split_slice_y(&plan.y_dsp, op, w.r, w.m - w.r);
+    plan.y_dsp.src[0] = w.dsp;
+    plan.y_dsp.src[1] = x;
 
-    hex_split_plan & ref = plans.emplace(std::string(op->name), std::move(plan)).first->second;
+    GGML_LOG_INFO("ggml-hex: split %s: host rows %" PRId64 ", dsp rows %" PRId64 " of %" PRId64
+            ", host weight %.2f MiB, out base mod 128 %zu, boundary off %zu\n",
+            w.name.c_str(), w.r, w.m - w.r, w.m, (double) w.host.size() / (1024.0 * 1024.0),
+            (size_t) ((uintptr_t) op->data % 128), (size_t) ((w.r * (int64_t) op->nb[0]) % 128));
+
+    hex_split_plan & ref = plans.emplace(w.name, std::move(plan)).first->second;
     ref.dsp = std::make_unique<htp_opnode>(HTP_OP_INVALID, &ref.y_dsp);
     return &ref;
 }
 
-static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode & node,
-                                 hex_split_plan * plan, const struct htp_mm_kernel_params * params) {
+// One call runs the two shares of one MUL_MAT. The DSP share is submitted first
+// and the host share is computed while it runs; a single wait joins them before
+// the node returns, so no later DSP op can read a half written output.
+static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode & node, hex_split_plan * plan) {
     ggml_backend_t cpu_be = hex_split_cpu_backend();
     if (!cpu_be) {
         return GGML_STATUS_FAILED;
@@ -8165,58 +8419,109 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
 
     // the graph may be rebuilt between tokens, so follow the current tensors
     const ggml_tensor * op = node.node;
-    plan->y_dsp.data  = op->data;
-    plan->w_dsp.data  = (char *) op->src[0]->data + (size_t) plan->r * op->src[0]->nb[1];
-    plan->x_cpu->data = op->src[1]->data;
+    ggml_tensor *       x  = op->src[1];
+    hex_split_weight &  w  = *plan->w;
+
+    plan->y_dsp.data  = (char *) op->data + (size_t) w.r * op->nb[0];
+    plan->y_dsp.src[1] = x;
+    plan->x_cpu->data = x->data;
     plan->y_cpu->data = op->data;
 
-    // A rebuilt graph may hand back the same name with a different weight address.
-    // A stale host copy would give silently wrong results.
-    const ggml_tensor * w_now = op->src[0];
-    if (plan->cpu_w_src != w_now->data) {
-        const size_t cpu_bytes = ggml_row_size(w_now->type, w_now->ne[0]) * (size_t) plan->r;
-        free(plan->cpu_w);
-        plan->cpu_w = (uint8_t *) malloc(cpu_bytes);
-        if (!plan->cpu_w) {
-            return GGML_STATUS_FAILED;
-        }
-        memcpy(plan->cpu_w, w_now->data, cpu_bytes);
-        plan->cpu_w_src = w_now->data;
-    }
     // Parameters must describe the halved tensors, not the original node. The
     // original node's m is twice the DSP share, so reusing its cached parameters
     // made the DSP write past its output on the second step.
-    GGML_UNUSED(params);
-    ggml_hexagon_precompute_matmul_params(sess, &plan->w_dsp, plan->y_dsp.src[1], &plan->y_dsp,
+    ggml_hexagon_precompute_matmul_params(sess, w.dsp, x, &plan->y_dsp,
             (struct htp_mm_kernel_params *) plan->dsp->kernel_params);
     plan->dsp->opcode = HTP_OP_MUL_MAT;
 
-    // 1. submit the DSP share and let it run
-    const uint64_t t0 = hex_now_us();
+    const bool seq = hex_split_sequential();
+
+    // Diagnostic runs poison the whole output before the submit. The two shares
+    // must then overwrite every row of their own range, so a leftover -12345 is
+    // an unwritten row and a wrong range shows up as well.
+    const bool diag = hex_split_dump_path() != nullptr;
+    if (diag) {
+        float * out = (float *) op->data;
+        for (int64_t i = 0; i < w.m; i++) {
+            out[i] = -12345.0f;
+        }
+    }
+
+    const uint64_t ts0 = hex_now_us();
     sess->enqueue_op(*plan->dsp);
     sess->flush_async();
-    const uint64_t t1 = hex_now_us();
+    const uint64_t ts1 = hex_now_us();
 
-    // 2. compute the CPU share while the DSP works
-    const ggml_status rc = ggml_backend_graph_compute(cpu_be, plan->gf);
-    const uint64_t t2 = hex_now_us();
+    uint64_t     tw0 = 0, tw1 = 0;
+    ggml_status  rc  = GGML_STATUS_SUCCESS;
 
-    static uint64_t sum_submit = 0, sum_cpu = 0;
-    static uint32_t n_calls = 0, msg_every = 0;
-    if (msg_every == 0) {
-        const char * e = getenv("GGML_HEXAGON_SPLIT_TRACE");
-        msg_every = e ? (uint32_t) atoi(e) : 0;
+    if (seq) {
+        tw0 = hex_now_us();
+        sess->flush_sync();
+        tw1 = hex_now_us();
     }
-    sum_submit += t1 - t0;
-    sum_cpu    += t2 - t1;
-    if (msg_every > 0 && ++n_calls % msg_every == 0) {
-        GGML_LOG_INFO("ggml-hex: split trace n %u submit_us %llu cpu_us %llu\n", n_calls,
-                (unsigned long long) sum_submit, (unsigned long long) sum_cpu);
-        sum_submit = 0;
-        sum_cpu    = 0;
+
+    const uint64_t tc0 = hex_now_us();
+    rc = ggml_backend_graph_compute(cpu_be, plan->gf);
+    const uint64_t tc1 = hex_now_us();
+
+    if (!seq) {
+        tw0 = hex_now_us();
+        sess->flush_sync();
+        tw1 = hex_now_us();
+    }
+
+    if (diag && plan->gf_ref && !plan->ref_buf.empty()) {
+        // second run of the same host share, same inputs, private output
+        plan->x_ref->data = x->data;
+        plan->y_ref->data = plan->ref_buf.data();
+        ggml_backend_graph_compute(cpu_be, plan->gf_ref);
+
+        const size_t cmp_bytes = (size_t) w.r * sizeof(float);
+        const float * got      = (const float *) op->data;
+        const bool    same     = memcmp(got, plan->ref_buf.data(), cmp_bytes) == 0;
+        size_t        ndiff    = 0;
+        double        dmax     = 0.0;
+        if (!same) {
+            const uint32_t * a = (const uint32_t *) got;
+            const uint32_t * b = (const uint32_t *) plan->ref_buf.data();
+            for (int64_t i = 0; i < w.r; i++) {
+                if (a[i] != b[i]) {
+                    ndiff++;
+                    dmax = std::max(dmax, (double) std::fabs(got[i] - plan->ref_buf[i]));
+                }
+            }
+        }
+        GGML_LOG_INFO("ggml-hex: split verify %s host rows %" PRId64 " cpu_vs_cpuref %s nonbit %zu max %.6f"
+                " boundary row %" PRId64 " %.6f row %" PRId64 " %.6f\n",
+                w.name.c_str(), w.r, same ? "same" : "DIFF", ndiff, dmax,
+                w.r - 1, (double) got[w.r - 1], w.r, (double) got[w.r]);
+    }
+
+    if (diag) {
+        hex_split_dump_write(op);
+    }
+
+    static const bool trace = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_TRACE");
+        return e && atoi(e) != 0;
+    }();
+    if (trace) {
+        GGML_LOG_INFO("ggml-hex: split %s %s t_submit_begin %llu t_submit_return %llu t_cpu_begin %llu"
+                " t_cpu_end %llu t_wait_begin %llu t_wait_end %llu submit_us %llu cpu_us %llu wait_us %llu total_us %llu\n",
+                w.name.c_str(), seq ? "seq" : "async",
+                (unsigned long long) ts0, (unsigned long long) ts1, (unsigned long long) tc0,
+                (unsigned long long) tc1, (unsigned long long) tw0, (unsigned long long) tw1,
+                (unsigned long long) (ts1 - ts0), (unsigned long long) (tc1 - tc0),
+                (unsigned long long) (tw1 - tw0), (unsigned long long) (tw1 - ts0));
     }
 
     if (rc != GGML_STATUS_SUCCESS) {
+        GGML_LOG_ERROR("ggml-hex: split %s: the CPU share failed\n", w.name.c_str());
+        return GGML_STATUS_FAILED;
+    }
+    if (sess->last_error > HTP_STATUS_OK) {
+        GGML_LOG_ERROR("ggml-hex: split %s: the DSP share failed\n", w.name.c_str());
         return GGML_STATUS_FAILED;
     }
 
@@ -8365,15 +8670,28 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
 
     // Queue and execute
     const bool split_on = hex_split_enabled();
-    for (const auto & node : *nodes_ptr) {
-        if (split_on && node.opcode == HTP_OP_MUL_MAT && node.node->ne[1] == 1 && node.node->src[0] &&
-                node.node->src[0]->ne[1] > 2 && std::regex_search(node.node->name, *hex_split_filter())) {
-            hex_split_plan * plan = hex_split_plan_get(node.node);
-            if (plan && hex_split_run(sess, node, plan,
-                        (const struct htp_mm_kernel_params *) node.kernel_params) == GGML_STATUS_SUCCESS) {
-                continue;
+
+    // a run without the split must still produce the full tensor reference
+    if (hex_split_dump_path() && !split_on && !hex_split_dump_pending) {
+        for (int i = 0; i < graph->n_nodes; i++) {
+            ggml_tensor * n = graph->nodes[i];
+            if (n->op == GGML_OP_MUL_MAT && n->src[0] && n->ne[1] == 1 &&
+                    hex_split_weight_match(n->src[0]->name)) {
+                hex_split_dump_tensor  = n;
+                hex_split_dump_pending = true;
             }
-            GGML_LOG_ERROR("ggml-hex: split failed for %s, using the DSP alone\n", node.node->name);
+        }
+    }
+
+    for (const auto & node : *nodes_ptr) {
+        if (split_on && node.opcode == HTP_OP_MUL_MAT && node.node->ne[1] == 1) {
+            hex_split_plan * plan = hex_split_plan_get(node.node);
+            if (plan) {
+                if (hex_split_run(sess, node, plan) == GGML_STATUS_SUCCESS) {
+                    continue;
+                }
+                GGML_LOG_ERROR("ggml-hex: split failed for %s, using the DSP alone\n", node.node->name);
+            }
         }
         sess->enqueue_op(node);
     }
@@ -8394,6 +8712,11 @@ static void ggml_backend_hexagon_synchronize(ggml_backend_t backend) {
     sess->flush_sync();
     if (sess->last_error > HTP_STATUS_OK) {
         GGML_ABORT("ggml-hex: %s synchronize failed : dsp-error %s\n", sess->c_name(), status_to_str(sess->last_error));
+    }
+
+    if (hex_split_dump_pending) {
+        hex_split_dump_pending = false;
+        hex_split_dump_write(hex_split_dump_tensor);
     }
 
     if (opt_timeline) {
