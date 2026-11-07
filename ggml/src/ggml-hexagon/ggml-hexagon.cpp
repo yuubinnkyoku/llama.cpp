@@ -8124,8 +8124,11 @@ static int hex_split_cpu_rows(int64_t m) {
     static const int    nrows = []() { const char * e = getenv("GGML_HEXAGON_SPLIT_CPU_ROWS"); return e ? atoi(e) : 0; }();
     static const double frac  = []() { const char * e = getenv("GGML_HEXAGON_SPLIT_CPU_FRAC"); return e ? atof(e) : 0.5; }();
     int64_t r = nrows > 0 ? nrows : (int64_t) (frac * (double) m + 0.5);
-    if (r < 1) { r = 1; }
-    if (r > m - 1) { r = m - 1; }
+    // the tiled layout groups 32 rows per block, so only a 32 row aligned split
+    // point lets the DSP share alias the model buffer's own tiled copy
+    r &= ~(int64_t) 31;
+    if (r < 32) { r = 32; }
+    if (r > m - 32) { r = m - 32; }
     return (int) r;
 }
 
