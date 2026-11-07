@@ -8163,7 +8163,11 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
                 (int) ggml_backend_buffer_get_usage(buffer));
         return;
     }
-    if (t->type != GGML_TYPE_IQ2_S || t->ne[2] != 1 || t->ne[3] != 1) {
+    // Any block quantized weight the DSP can multiply works here. The model is a
+    // mixed precision GGUF, so the type is a property of the tensor, not of the
+    // file name: blk.0.ffn_up.weight is IQ1_M in Qwen3.8-27B-GSQ-RCO-IQ2_S.
+    // IQ4_XS keeps its own scan and commit state, so it stays out.
+    if (t->type == GGML_TYPE_IQ4_XS || t->ne[2] != 1 || t->ne[3] != 1 || ggml_blck_size(t->type) == 1) {
         GGML_LOG_INFO("ggml-hex: split %s not taken: type %s ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 "\n",
                 t->name, ggml_type_name(t->type), t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
         return;
@@ -8236,10 +8240,10 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     const size_t buf_size   = ggml_backend_buffer_get_size(w.buf);
     const bool   in_buf     = off_in_buf + dsp_bytes <= buf_size;
 
-    GGML_LOG_INFO("ggml-hex: split weight %s: k %" PRId64 " m %" PRId64 " host rows %" PRId64
+    GGML_LOG_INFO("ggml-hex: split weight %s (%s): k %" PRId64 " m %" PRId64 " host rows %" PRId64
             " dsp rows %" PRId64 " row %zu B, host %.2f MiB, dsp %.2f MiB in %.2f MiB at off %zu"
             " usage %d, r mod 32 %" PRId64 ", readback ndiff %zu first %zd, in buf %d\n",
-            t->name, k, m, r, m - r, row_bytes,
+            t->name, ggml_type_name(t->type), k, m, r, m - r, row_bytes,
             (double) host_bytes / (1024.0 * 1024.0), (double) dsp_bytes / (1024.0 * 1024.0),
             (double) buf_size / (1024.0 * 1024.0), off_in_buf,
             (int) ggml_backend_buffer_get_usage(w.buf), r % 32, ndiff,
@@ -8269,12 +8273,23 @@ static const char * hex_split_dump_path() {
     return p;
 }
 
+// Separate file for the full tensor DSP reference of the same step. When it is
+// set, the split op runs the original node once before splitting, so the
+// reference comes from the same process, the same weights and the same input as
+// the split it is compared with.
+static const char * hex_split_dump_ref_path() {
+    static const char * p = []() -> const char * {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_DUMP_REF");
+        return e && *e ? e : nullptr;
+    }();
+    return p;
+}
+
 static const ggml_tensor * hex_split_dump_tensor  = nullptr;
 static bool                hex_split_dump_pending = false;
 static uint32_t            hex_split_dump_step    = 0;
 
-static void hex_split_dump_write(const ggml_tensor * t) {
-    const char * path = hex_split_dump_path();
+static void hex_split_dump_write_to(const char * path, const ggml_tensor * t) {
     if (!path || !t) {
         return;
     }
@@ -8434,6 +8449,16 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
             (struct htp_mm_kernel_params *) plan->dsp->kernel_params);
     plan->dsp->opcode = HTP_OP_MUL_MAT;
 
+    // Diagnostic: run the original full tensor node once on the DSP and dump it,
+    // so the split rows of this step are compared against this same step, the
+    // same weights and the same input, not against another process.
+    if (hex_split_dump_ref_path()) {
+        sess->enqueue_op(node);
+        sess->flush_async();
+        sess->flush_sync();
+        hex_split_dump_write_to(hex_split_dump_ref_path(), op);
+    }
+
     const bool seq = hex_split_sequential();
 
     // Diagnostic runs poison the whole output before the submit. The two shares
@@ -8499,7 +8524,7 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     }
 
     if (diag) {
-        hex_split_dump_write(op);
+        hex_split_dump_write_to(hex_split_dump_path(), op);
     }
 
     static const bool trace = []() {
@@ -8556,6 +8581,24 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
     }
 
     HEX_VERBOSE("ggml-hex: %s graph-compute n_nodes %d\n", sess->c_name(), graph->n_nodes);
+
+    // Phase 46 diagnostic: which one column MUL_MATs the HTP backend is handed.
+    // Placement is decided by the scheduler, so this is the only way to see it.
+    static const bool mm_dbg = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_DEBUG");
+        return e && atoi(e) != 0;
+    }();
+    static int htp_mm_log = 0;
+    for (int i = 0; mm_dbg && i < graph->n_nodes && htp_mm_log < 24; i++) {
+        const ggml_tensor * n = graph->nodes[i];
+        if (n->op != GGML_OP_MUL_MAT || n->ne[1] != 1) {
+            continue;
+        }
+        htp_mm_log++;
+        GGML_LOG_INFO("ggml-hex: htp mm#%d %s ne %" PRId64 "x%" PRId64 " src0 %s type %s\n", htp_mm_log, n->name,
+                n->ne[0], n->ne[1], n->src[0] ? n->src[0]->name : "-",
+                n->src[0] ? ggml_type_name(n->src[0]->type) : "-");
+    }
 
     const std::vector<htp_opnode> * nodes_ptr = nullptr;
     std::vector<htp_opnode> computed_nodes;
@@ -8716,7 +8759,7 @@ static void ggml_backend_hexagon_synchronize(ggml_backend_t backend) {
 
     if (hex_split_dump_pending) {
         hex_split_dump_pending = false;
-        hex_split_dump_write(hex_split_dump_tensor);
+        hex_split_dump_write_to(hex_split_dump_path(), hex_split_dump_tensor);
     }
 
     if (opt_timeline) {
@@ -9135,7 +9178,7 @@ static void ggml_hexagon_event_synchronize(ggml_backend_dev_t dev, ggml_hexagon_
     // so the split dump of the non-split reference run is written here.
     if (hex_split_dump_pending) {
         hex_split_dump_pending = false;
-        hex_split_dump_write(hex_split_dump_tensor);
+        hex_split_dump_write_to(hex_split_dump_path(), hex_split_dump_tensor);
     }
 }
 
