@@ -8273,8 +8273,7 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     // the compact DSP share and the host share.
     GGML_LOG_INFO("ggml-hex: split %s holds original %zu B in the model buffer, dsp share %zu B"
             " in a %zu B buffer, host share %zu B, added %zu B\n",
-            t->name, ggml_nbytes(t), dsp_bytes, buf_size, host_bytes,
-            dsp_bytes + buf_size - ggml_nbytes(t) + host_bytes);
+            t->name, ggml_nbytes(t), dsp_bytes, buf_size, host_bytes, buf_size + host_bytes);
 
     w.dsp   = dsp;
     w.ready = true;
