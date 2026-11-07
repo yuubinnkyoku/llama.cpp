@@ -8032,6 +8032,7 @@ static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tens
 // dimension, which is the output's first dimension.
 struct hex_split_weight {
     std::string           name;
+    const ggml_tensor *   tensor    = nullptr; // the captured tensor, to detect a second model
     ggml_context *        ctx       = nullptr;
     ggml_tensor *         dsp       = nullptr;
     ggml_backend_buffer_t buf       = nullptr;
@@ -8222,7 +8223,15 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     }
 
     auto & weights = hex_split_weights();
-    if (weights.find(t->name) != weights.end()) {
+    auto   wit     = weights.find(t->name);
+    if (wit != weights.end()) {
+        if (wit->second.tensor == t) {
+            return;
+        }
+        // The registry lives for the process, so a second model that reuses the
+        // name would otherwise split against the first model's weights.
+        GGML_LOG_ERROR("ggml-hex: split %s: another model already captured this name,"
+                " the split keeps one model per process; not splitting\n", t->name);
         return;
     }
 
@@ -8243,6 +8252,7 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
 
     hex_split_weight w;
     w.name      = t->name;
+    w.tensor    = t;
     w.k         = k;
     w.m         = m;
     w.r         = r;
@@ -8422,6 +8432,12 @@ static hex_split_plan * hex_split_plan_get(const ggml_tensor * op) {
         return nullptr;
     }
     hex_split_weight & w = wit->second;
+
+    // the plan cache and the weights are per process, so a weight from a second
+    // model must not be split against the first model's shares
+    if (w.tensor != w_in) {
+        return nullptr;
+    }
 
     if (op->type != GGML_TYPE_F32 || op->ne[1] != 1 || op->ne[2] != 1 || op->ne[3] != 1) {
         return nullptr;
