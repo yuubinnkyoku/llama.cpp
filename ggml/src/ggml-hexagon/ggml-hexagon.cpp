@@ -8552,13 +8552,14 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
         return e && atoi(e) != 0;
     }();
     if (trace) {
+        const uint64_t op_end = tw1 > tc1 ? tw1 : tc1;
         GGML_LOG_INFO("ggml-hex: split %s %s t_submit_begin %llu t_submit_return %llu t_cpu_begin %llu"
-                " t_cpu_end %llu t_wait_begin %llu t_wait_end %llu submit_us %llu cpu_us %llu wait_us %llu total_us %llu\n",
+                " t_cpu_end %llu t_wait_begin %llu t_wait_end %llu submit_us %llu cpu_us %llu wait_us %llu op_us %llu\n",
                 w.name.c_str(), seq ? "seq" : "async",
                 (unsigned long long) ts0, (unsigned long long) ts1, (unsigned long long) tc0,
                 (unsigned long long) tc1, (unsigned long long) tw0, (unsigned long long) tw1,
                 (unsigned long long) (ts1 - ts0), (unsigned long long) (tc1 - tc0),
-                (unsigned long long) (tw1 - tw0), (unsigned long long) (tw1 - ts0));
+                (unsigned long long) (tw1 - tw0), (unsigned long long) (op_end - ts0));
     }
 
     if (rc != GGML_STATUS_SUCCESS) {
