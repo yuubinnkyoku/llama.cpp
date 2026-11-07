@@ -8209,8 +8209,7 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     // Only types the DSP matmul kernel really accepts. The model is a mixed
     // precision GGUF, so the type is a property of the tensor and not of the file
     // name: blk.0.ffn_up.weight is IQ1_M and IQ1_M is absent from
-    // ggml_hexagon_supported_mul_mat(), so it can never be split. This round
-    // targets IQ3_S, which is in that list and has its own tiled layout.
+    // ggml_hexagon_supported_mul_mat(), so it can never be split.
     if (!hex_split_type_ok(t->type) || t->ne[2] != 1 || t->ne[3] != 1) {
         GGML_LOG_INFO("ggml-hex: split %s not taken: type %s is not a supported split type"
                 " (ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 ")\n",
