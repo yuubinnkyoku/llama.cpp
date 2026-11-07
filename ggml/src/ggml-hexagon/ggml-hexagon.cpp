@@ -8150,6 +8150,16 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     if (!hex_split_enabled() || !data) {
         return;
     }
+    // Which ffn_up types this GGUF actually has. The model is mixed precision, so
+    // the type decides whether the DSP can run the matmul at all.
+    static const bool cap_dbg = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_DEBUG");
+        return e && atoi(e) != 0;
+    }();
+    if (cap_dbg && strstr(t->name, "ffn_up.weight")) {
+        GGML_LOG_INFO("ggml-hex: weight %s type %s ne %" PRId64 "x%" PRId64 " usage %d\n", t->name,
+                ggml_type_name(t->type), t->ne[0], t->ne[1], (int) ggml_backend_buffer_get_usage(buffer));
+    }
     if (!hex_split_weight_match(t->name)) {
         return;
     }
