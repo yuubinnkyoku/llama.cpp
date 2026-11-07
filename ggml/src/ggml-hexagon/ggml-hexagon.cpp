@@ -8027,7 +8027,7 @@ static bool is_mergeable_mul_mat_id_pair(const ggml_tensor * n1, const ggml_tens
 // the host share keeps the GGUF rows [0, r) in plain memory.
 //
 // Enabled with GGML_HEXAGON_SPLIT=1 for the tensor names listed in
-// GGML_HEXAGON_SPLIT_WEIGHTS (default: blk.0.ffn_up.weight). The node must be a
+// GGML_HEXAGON_SPLIT_WEIGHTS (default: blk.57.ffn_up.weight). The node must be a
 // one column MUL_MAT (decode); the split is a row count on the weight's second
 // dimension, which is the output's first dimension.
 struct hex_split_weight {
@@ -8087,7 +8087,7 @@ static bool hex_split_weight_match(const char * name) {
         std::vector<std::string> v;
         const char * e = getenv("GGML_HEXAGON_SPLIT_WEIGHTS");
         if (!e || !*e) {
-            e = "blk.0.ffn_up.weight";
+            e = "blk.57.ffn_up.weight";
         }
         const std::string s(e);
         size_t p = 0;
@@ -8173,12 +8173,14 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
                 (int) ggml_backend_buffer_get_usage(buffer));
         return;
     }
-    // Any block quantized weight the DSP can multiply works here. The model is a
-    // mixed precision GGUF, so the type is a property of the tensor, not of the
-    // file name: blk.0.ffn_up.weight is IQ1_M in Qwen3.8-27B-GSQ-RCO-IQ2_S.
-    // IQ4_XS keeps its own scan and commit state, so it stays out.
-    if (t->type == GGML_TYPE_IQ4_XS || t->ne[2] != 1 || t->ne[3] != 1 || ggml_blck_size(t->type) == 1) {
-        GGML_LOG_INFO("ggml-hex: split %s not taken: type %s ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 "\n",
+    // Only types the DSP matmul kernel really accepts. The model is a mixed
+    // precision GGUF, so the type is a property of the tensor and not of the file
+    // name: blk.0.ffn_up.weight is IQ1_M and IQ1_M is absent from
+    // ggml_hexagon_supported_mul_mat(), so it can never be split. This round
+    // targets IQ3_S, which is in that list and has its own tiled layout.
+    if (t->type != GGML_TYPE_IQ3_S || t->ne[2] != 1 || t->ne[3] != 1) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: type %s is not the supported split type IQ3_S"
+                " (ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 ")\n",
                 t->name, ggml_type_name(t->type), t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
         return;
     }
@@ -8265,6 +8267,14 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
         ggml_free(w.ctx);
         return;
     }
+
+    // What this tensor now holds. With n_gpu_layers 23 the model buffer already
+    // carries the full tensor, so the split keeps three copies alive: that one,
+    // the compact DSP share and the host share.
+    GGML_LOG_INFO("ggml-hex: split %s holds original %zu B in the model buffer, dsp share %zu B"
+            " in a %zu B buffer, host share %zu B, added %zu B\n",
+            t->name, ggml_nbytes(t), dsp_bytes, buf_size, host_bytes,
+            dsp_bytes + buf_size - ggml_nbytes(t) + host_bytes);
 
     w.dsp   = dsp;
     w.ready = true;
