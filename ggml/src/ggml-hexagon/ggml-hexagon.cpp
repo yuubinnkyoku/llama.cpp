@@ -8091,6 +8091,15 @@ static bool hex_split_alias() {
     return on;
 }
 
+// Host share first, no host wait: the DSP queue order joins the two shares.
+static bool hex_split_nosync() {
+    static const bool on = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_NOSYNC");
+        return e && atoi(e) != 0;
+    }();
+    return on;
+}
+
 static bool hex_split_weight_match(const char * name) {
     static const std::vector<std::string> names = []() {
         std::vector<std::string> v;
@@ -8118,6 +8127,18 @@ static bool hex_split_weight_match(const char * name) {
         }
     }
     return false;
+}
+
+// Types whose DSP store is a row block tiled repack, so the tail rows are one
+// contiguous tiled range and both the alias and the compact copy work.
+static bool hex_split_type_ok(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ3_XXS:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static int hex_split_cpu_rows(int64_t m) {
@@ -8190,8 +8211,8 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     // name: blk.0.ffn_up.weight is IQ1_M and IQ1_M is absent from
     // ggml_hexagon_supported_mul_mat(), so it can never be split. This round
     // targets IQ3_S, which is in that list and has its own tiled layout.
-    if (t->type != GGML_TYPE_IQ3_S || t->ne[2] != 1 || t->ne[3] != 1) {
-        GGML_LOG_INFO("ggml-hex: split %s not taken: type %s is not the supported split type IQ3_S"
+    if (!hex_split_type_ok(t->type) || t->ne[2] != 1 || t->ne[3] != 1) {
+        GGML_LOG_INFO("ggml-hex: split %s not taken: type %s is not a supported split type"
                 " (ne %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 ")\n",
                 t->name, ggml_type_name(t->type), t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
         return;
@@ -8517,7 +8538,8 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
         hex_split_dump_write_to(hex_split_dump_ref_path(), op);
     }
 
-    const bool seq = hex_split_sequential();
+    const bool seq    = hex_split_sequential();
+    const bool nosync = hex_split_nosync();
 
     // Diagnostic runs poison the whole output before the submit. The two shares
     // must then overwrite every row of their own range, so a leftover -12345 is
@@ -8530,28 +8552,47 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
         }
     }
 
-    const uint64_t ts0 = hex_now_us();
-    sess->enqueue_op(*plan->dsp);
-    sess->flush_async();
-    const uint64_t ts1 = hex_now_us();
+    uint64_t    ts0 = 0, ts1 = 0, tc0 = 0, tc1 = 0;
+    uint64_t    tw0 = 0, tw1 = 0;
+    ggml_status rc  = GGML_STATUS_SUCCESS;
 
-    uint64_t     tw0 = 0, tw1 = 0;
-    ggml_status  rc  = GGML_STATUS_SUCCESS;
+    if (nosync) {
+        // Host share first, then the DSP share, and no host wait: the DSP runs
+        // its queue in order, so the next DSP op reads a complete output. The
+        // host only waits when a diagnostic has to read the result.
+        tc0 = hex_now_us();
+        rc  = ggml_backend_graph_compute(cpu_be, plan->gf);
+        tc1 = hex_now_us();
+        ts0 = hex_now_us();
+        sess->enqueue_op(*plan->dsp);
+        sess->flush_async();
+        ts1 = hex_now_us();
+        if (diag) {
+            tw0 = hex_now_us();
+            sess->flush_sync();
+            tw1 = hex_now_us();
+        }
+    } else {
+        ts0 = hex_now_us();
+        sess->enqueue_op(*plan->dsp);
+        sess->flush_async();
+        ts1 = hex_now_us();
 
-    if (seq) {
-        tw0 = hex_now_us();
-        sess->flush_sync();
-        tw1 = hex_now_us();
-    }
+        if (seq) {
+            tw0 = hex_now_us();
+            sess->flush_sync();
+            tw1 = hex_now_us();
+        }
 
-    const uint64_t tc0 = hex_now_us();
-    rc = ggml_backend_graph_compute(cpu_be, plan->gf);
-    const uint64_t tc1 = hex_now_us();
+        tc0 = hex_now_us();
+        rc  = ggml_backend_graph_compute(cpu_be, plan->gf);
+        tc1 = hex_now_us();
 
-    if (!seq) {
-        tw0 = hex_now_us();
-        sess->flush_sync();
-        tw1 = hex_now_us();
+        if (!seq) {
+            tw0 = hex_now_us();
+            sess->flush_sync();
+            tw1 = hex_now_us();
+        }
     }
 
     if (diag && plan->gf_ref && !plan->ref_buf.empty()) {
@@ -8590,14 +8631,15 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
         return e && atoi(e) != 0;
     }();
     if (trace) {
-        const uint64_t op_end = tw1 > tc1 ? tw1 : tc1;
+        const uint64_t op_end   = tw1 > tc1 ? tw1 : tc1;
+        const uint64_t op_start = ts0 < tc0 ? ts0 : tc0;
         GGML_LOG_INFO("ggml-hex: split %s %s t_submit_begin %llu t_submit_return %llu t_cpu_begin %llu"
                 " t_cpu_end %llu t_wait_begin %llu t_wait_end %llu submit_us %llu cpu_us %llu wait_us %llu op_us %llu\n",
-                w.name.c_str(), seq ? "seq" : "async",
+                w.name.c_str(), nosync ? "nosync" : (seq ? "seq" : "async"),
                 (unsigned long long) ts0, (unsigned long long) ts1, (unsigned long long) tc0,
                 (unsigned long long) tc1, (unsigned long long) tw0, (unsigned long long) tw1,
                 (unsigned long long) (ts1 - ts0), (unsigned long long) (tc1 - tc0),
-                (unsigned long long) (tw1 - tw0), (unsigned long long) (op_end - ts0));
+                (unsigned long long) (tw1 - tw0), (unsigned long long) (op_end - op_start));
     }
 
     if (rc != GGML_STATUS_SUCCESS) {
