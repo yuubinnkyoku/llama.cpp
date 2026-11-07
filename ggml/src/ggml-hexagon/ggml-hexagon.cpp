@@ -8082,6 +8082,15 @@ static bool hex_split_sequential() {
     return on;
 }
 
+// Borrow the DSP share from the model buffer instead of allocating a copy.
+static bool hex_split_alias() {
+    static const bool on = []() {
+        const char * e = getenv("GGML_HEXAGON_SPLIT_ALIAS");
+        return !e || atoi(e) != 0;
+    }();
+    return on;
+}
+
 static bool hex_split_weight_match(const char * name) {
     static const std::vector<std::string> names = []() {
         std::vector<std::string> v;
@@ -8219,22 +8228,46 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
     // host share: plain memory, read by the CPU share on every token
     w.host.assign(src, src + host_bytes);
 
-    // dsp share: own compact tensor, own buffer, weights usage before the first map
+    // dsp share: the model buffer already holds this tensor in the DSP tiled
+    // layout, and that layout groups 32 rows per block. A 32 row aligned r starts
+    // a block, so rows [r, m) are one contiguous tiled range: borrow it instead of
+    // a second allocation. GGML_HEXAGON_SPLIT_ALIAS=0 restores the copy.
     ggml_init_params ip = { 1024u * 1024u, nullptr, true };
     w.ctx = ggml_init(ip);
     ggml_tensor * dsp = w.ctx ? ggml_new_tensor_2d(w.ctx, t->type, k, m - r) : nullptr;
     if (dsp) {
         const std::string dname = w.name + ".dsp";
         ggml_set_name(dsp, dname.c_str());
+    }
+
+    const size_t tiled_row  = ggml_hexagon_tiled_row_size(t->type, k);
+    const size_t tiled_tail = tiled_row * (size_t) (m - r);
+    const size_t base_off   = (size_t) ((const uint8_t *) t->data - (const uint8_t *) ggml_backend_buffer_get_base(buffer));
+    const size_t buf_bytes  = ggml_backend_buffer_get_size(buffer);
+    const bool   alias      = hex_split_alias() && dsp != nullptr && tiled_row != 0 && (r % 32) == 0 &&
+                              base_off + (size_t) r * tiled_row + tiled_tail <= buf_bytes;
+
+    if (dsp && alias) {
+        dsp->buffer = buffer;
+        dsp->data   = (char *) t->data + (size_t) r * tiled_row;
+        // the tiled getter and the descriptor need the buffer's own tensor state;
+        // set_tensor marks a weights write of a repack type, and no write happens
+        // here, so set the same flags by hand
+        ggml_backend_buffer_init_tensor(buffer, dsp);
+        auto * dextra = (ggml_hexagon_tensor_extra *) dsp->extra;
+        dextra->flags |= GGML_HEXAGON_TENSOR_WEIGHT | GGML_HEXAGON_TENSOR_REPACK;
+    } else if (dsp) {
         w.buf = ggml_backend_alloc_ctx_tensors_from_buft(w.ctx, ggml_backend_buffer_get_type(buffer));
     }
-    if (!w.buf) {
+    if (!dsp || (!alias && !w.buf)) {
         GGML_LOG_ERROR("ggml-hex: split %s rejected: cannot allocate the DSP share\n", t->name);
         if (w.ctx) { ggml_free(w.ctx); }
         return;
     }
-    ggml_backend_buffer_set_usage(w.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
-    ggml_backend_tensor_set(dsp, src + host_bytes, 0, dsp_bytes);
+    if (!alias) {
+        ggml_backend_buffer_set_usage(w.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        ggml_backend_tensor_set(dsp, src + host_bytes, 0, dsp_bytes);
+    }
 
     // readback: the tiled store must reproduce the GGUF rows exactly
     std::vector<uint8_t> check(dsp_bytes);
@@ -8248,32 +8281,35 @@ static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * t, con
         }
     }
 
-    const size_t off_in_buf = (size_t) ((const uint8_t *) dsp->data - (const uint8_t *) ggml_backend_buffer_get_base(w.buf));
-    const size_t buf_size   = ggml_backend_buffer_get_size(w.buf);
-    const bool   in_buf     = off_in_buf + dsp_bytes <= buf_size;
+    const ggml_backend_buffer_t dbuf = alias ? buffer : w.buf;
+    const size_t off_in_buf = (size_t) ((const uint8_t *) dsp->data - (const uint8_t *) ggml_backend_buffer_get_base(dbuf));
+    const size_t buf_size   = alias ? tiled_tail : ggml_backend_buffer_get_size(dbuf);
+    const bool   in_buf     = off_in_buf + dsp_bytes <= ggml_backend_buffer_get_size(dbuf);
 
     GGML_LOG_INFO("ggml-hex: split weight %s (%s): k %" PRId64 " m %" PRId64 " host rows %" PRId64
             " dsp rows %" PRId64 " row %zu B, host %.2f MiB, dsp %.2f MiB in %.2f MiB at off %zu"
-            " usage %d, r mod 32 %" PRId64 ", readback ndiff %zu first %zd, in buf %d\n",
+            " usage %d, alias %d, r mod 32 %" PRId64 ", readback ndiff %zu first %zd, in buf %d\n",
             t->name, ggml_type_name(t->type), k, m, r, m - r, row_bytes,
             (double) host_bytes / (1024.0 * 1024.0), (double) dsp_bytes / (1024.0 * 1024.0),
             (double) buf_size / (1024.0 * 1024.0), off_in_buf,
-            (int) ggml_backend_buffer_get_usage(w.buf), r % 32, ndiff,
+            (int) ggml_backend_buffer_get_usage(dbuf), (int) alias, r % 32, ndiff,
             first == (size_t) -1 ? (ptrdiff_t) -1 : (ptrdiff_t) first, (int) in_buf);
 
     if (ndiff != 0 || !in_buf) {
         GGML_LOG_ERROR("ggml-hex: split %s rejected: readback ndiff %zu in buf %d\n", t->name, ndiff, (int) in_buf);
-        ggml_backend_buffer_free(w.buf);
+        if (w.buf) { ggml_backend_buffer_free(w.buf); }
         ggml_free(w.ctx);
         return;
     }
 
-    // What this tensor now holds. With n_gpu_layers 23 the model buffer already
-    // carries the full tensor, so the split keeps three copies alive: that one,
-    // the compact DSP share and the host share.
+    // What this tensor now holds. The model buffer carries the full tensor in the
+    // tiled layout, so the alias variant adds only the host share; without it the
+    // split also keeps a compact DSP copy alive.
+    const size_t added = (alias ? 0 : buf_size) + host_bytes;
     GGML_LOG_INFO("ggml-hex: split %s holds original %zu B in the model buffer, dsp share %zu B"
-            " in a %zu B buffer, host share %zu B, added %zu B\n",
-            t->name, ggml_nbytes(t), dsp_bytes, buf_size, host_bytes, buf_size + host_bytes);
+            " in a %zu B %s, host share %zu B, added %zu B\n",
+            t->name, ggml_nbytes(t), dsp_bytes, buf_size,
+            alias ? "alias of the model buffer" : "buffer", host_bytes, added);
 
     w.dsp   = dsp;
     w.ready = true;
