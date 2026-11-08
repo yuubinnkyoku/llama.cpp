@@ -196,6 +196,150 @@ static inline void vec_dot_f32_f32_aa_2x2(const uint32_t n, float * restrict s0,
     hvx_vec_store_u(s1, 8, r0_r1_c1_sum);
 }
 
+// BF16 weight rows expanded to FP32 in registers. The expansion is the exact
+// bit shift (u32) h << 16, so the weights keep every bit they have.
+//
+// The HTP unpack returns the second 32 elements in the low vector of the pair
+// (measured with the one-hot probe in p49_bf16_test perm), so the two halves
+// are put back in element order here.
+
+static inline HVX_VectorPair hvx_vec_bf16_to_f32_pair(HVX_Vector v) {
+    const HVX_VectorPair w = Q6_Wuw_vunpack_Vuh(v);
+    return Q6_W_vcombine_VV(Q6_Vw_vasl_VwR(Q6_V_hi_W(w), 16), Q6_Vw_vasl_VwR(Q6_V_lo_W(w), 16));
+}
+
+static inline float hvx_scalar_bf16_to_f32(uint16_t v) {
+    union { uint32_t u; float f; } c;
+    c.u = ((uint32_t) v) << 16;
+    return c.f;
+}
+
+static inline void vec_dot_bf16_f32_aa_1x1(const uint32_t n, float * restrict s, const void * restrict vx, const void * restrict vy) {
+    const HVX_Vector * restrict x = (const HVX_Vector *) vx;
+    const HVX_Vector * restrict y = (const HVX_Vector *) vy;
+
+    const uint32_t nvec = n / VLEN_BF16;
+    const uint32_t nloe = n % VLEN_BF16;
+
+    HVX_Vector rsum = Q6_V_vzero();
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (i = 0; i < nvec; i++) {
+        const HVX_VectorPair xp = hvx_vec_bf16_to_f32_pair(x[i]);
+        rsum = HVX_OP_ADD_F32(rsum, HVX_OP_MUL_F32(Q6_V_lo_W(xp), y[2*i]));
+        rsum = HVX_OP_ADD_F32(rsum, HVX_OP_MUL_F32(Q6_V_hi_W(xp), y[2*i + 1]));
+    }
+
+    float acc = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(rsum));
+
+    for (uint32_t k = nvec * VLEN_BF16; k < n; k++) {
+        acc += hvx_scalar_bf16_to_f32(((const uint16_t *) vx)[k]) * ((const float *) vy)[k];
+    }
+
+    *s = acc;
+}
+
+static inline void vec_dot_bf16_f32_aa_2x1(const uint32_t n, float * restrict s0,
+                                const void * restrict vx0, const void * restrict vx1,
+                                const void * restrict vy0) {
+    const HVX_Vector * restrict x0 = (const HVX_Vector *) vx0;
+    const HVX_Vector * restrict x1 = (const HVX_Vector *) vx1;
+    const HVX_Vector * restrict y  = (const HVX_Vector *) vy0;
+
+    const uint32_t nvec = n / VLEN_BF16;
+    const uint32_t nloe = n % VLEN_BF16;
+
+    HVX_Vector rsum0 = Q6_V_vzero();
+    HVX_Vector rsum1 = Q6_V_vzero();
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        const HVX_Vector y0 = y[2*i];
+        const HVX_Vector y1 = y[2*i + 1];
+        const HVX_VectorPair xp0 = hvx_vec_bf16_to_f32_pair(x0[i]);
+        const HVX_VectorPair xp1 = hvx_vec_bf16_to_f32_pair(x1[i]);
+        rsum0 = HVX_OP_ADD_F32(rsum0, HVX_OP_MUL_F32(Q6_V_lo_W(xp0), y0));
+        rsum0 = HVX_OP_ADD_F32(rsum0, HVX_OP_MUL_F32(Q6_V_hi_W(xp0), y1));
+        rsum1 = HVX_OP_ADD_F32(rsum1, HVX_OP_MUL_F32(Q6_V_lo_W(xp1), y0));
+        rsum1 = HVX_OP_ADD_F32(rsum1, HVX_OP_MUL_F32(Q6_V_hi_W(xp1), y1));
+    }
+
+    float acc[2];
+    hvx_vec_store_u(acc, 8, hvx_vec_reduce_sum_f32x2(rsum0, rsum1));
+
+    for (uint32_t k = nvec * VLEN_BF16; k < n; k++) {
+        const float yk = ((const float *) vy0)[k];
+        acc[0] += hvx_scalar_bf16_to_f32(((const uint16_t *) vx0)[k]) * yk;
+        acc[1] += hvx_scalar_bf16_to_f32(((const uint16_t *) vx1)[k]) * yk;
+    }
+
+    s0[0] = acc[0];
+    s0[1] = acc[1];
+}
+
+static inline void vec_dot_bf16_f32_aa_2x2(const uint32_t n, float * restrict s0, float * restrict s1,
+                                const void * restrict vx0, const void * restrict vx1,
+                                const void * restrict vy0, const void * restrict vy1) {
+    const HVX_Vector * restrict x0 = (const HVX_Vector *) vx0;
+    const HVX_Vector * restrict x1 = (const HVX_Vector *) vx1;
+    const HVX_Vector * restrict y0 = (const HVX_Vector *) vy0;
+    const HVX_Vector * restrict y1 = (const HVX_Vector *) vy1;
+
+    const uint32_t nvec = n / VLEN_BF16;
+    const uint32_t nloe = n % VLEN_BF16;
+
+    HVX_Vector r0_c0_sum = Q6_V_vzero();
+    HVX_Vector r0_c1_sum = Q6_V_vzero();
+    HVX_Vector r1_c0_sum = Q6_V_vzero();
+    HVX_Vector r1_c1_sum = Q6_V_vzero();
+
+    uint32_t i = 0;
+
+    #pragma unroll(2)
+    for (i = 0; i < nvec; i++) {
+        const HVX_VectorPair xp0 = hvx_vec_bf16_to_f32_pair(x0[i]);
+        const HVX_VectorPair xp1 = hvx_vec_bf16_to_f32_pair(x1[i]);
+        const HVX_Vector c0_lo = y0[2*i];
+        const HVX_Vector c0_hi = y0[2*i + 1];
+        const HVX_Vector c1_lo = y1[2*i];
+        const HVX_Vector c1_hi = y1[2*i + 1];
+
+        r0_c0_sum = HVX_OP_ADD_F32(r0_c0_sum, HVX_OP_MUL_F32(Q6_V_lo_W(xp0), c0_lo));
+        r0_c0_sum = HVX_OP_ADD_F32(r0_c0_sum, HVX_OP_MUL_F32(Q6_V_hi_W(xp0), c0_hi));
+        r0_c1_sum = HVX_OP_ADD_F32(r0_c1_sum, HVX_OP_MUL_F32(Q6_V_lo_W(xp0), c1_lo));
+        r0_c1_sum = HVX_OP_ADD_F32(r0_c1_sum, HVX_OP_MUL_F32(Q6_V_hi_W(xp0), c1_hi));
+        r1_c0_sum = HVX_OP_ADD_F32(r1_c0_sum, HVX_OP_MUL_F32(Q6_V_lo_W(xp1), c0_lo));
+        r1_c0_sum = HVX_OP_ADD_F32(r1_c0_sum, HVX_OP_MUL_F32(Q6_V_hi_W(xp1), c0_hi));
+        r1_c1_sum = HVX_OP_ADD_F32(r1_c1_sum, HVX_OP_MUL_F32(Q6_V_lo_W(xp1), c1_lo));
+        r1_c1_sum = HVX_OP_ADD_F32(r1_c1_sum, HVX_OP_MUL_F32(Q6_V_hi_W(xp1), c1_hi));
+    }
+
+    float acc0[2];
+    float acc1[2];
+    hvx_vec_store_u(acc0, 8, hvx_vec_reduce_sum_f32x2(r0_c0_sum, r1_c0_sum));
+    hvx_vec_store_u(acc1, 8, hvx_vec_reduce_sum_f32x2(r0_c1_sum, r1_c1_sum));
+
+    for (uint32_t k = nvec * VLEN_BF16; k < n; k++) {
+        const float c0 = ((const float *) vy0)[k];
+        const float c1 = ((const float *) vy1)[k];
+        const float w0 = hvx_scalar_bf16_to_f32(((const uint16_t *) vx0)[k]);
+        const float w1 = hvx_scalar_bf16_to_f32(((const uint16_t *) vx1)[k]);
+        acc0[0] += w0 * c0;
+        acc0[1] += w1 * c0;
+        acc1[0] += w0 * c1;
+        acc1[1] += w1 * c1;
+    }
+
+    s0[0] = acc0[0];
+    s0[1] = acc0[1];
+    s1[0] = acc1[0];
+    s1[1] = acc1[1];
+}
+
 #undef HVX_OP_ADD_F32
 #undef HVX_OP_MUL_F32
 

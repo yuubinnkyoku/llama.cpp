@@ -11,6 +11,7 @@
 #define VLEN        (128)
 #define VLEN_FP32   (VLEN / SIZEOF_FP32)
 #define VLEN_FP16   (VLEN / SIZEOF_FP16)
+#define VLEN_BF16   (VLEN / SIZEOF_FP16)
 
 typedef union {
     HVX_Vector v;

@@ -98,6 +98,7 @@ enum htp_mm_kernel_type {
     // HVX floating-point paths
     HTP_MM_KERNEL_HVX_F16_F16_VTCM,
     HTP_MM_KERNEL_HVX_F32_F32_VTCM,
+    HTP_MM_KERNEL_HVX_BF16_F32_VTCM,
 
     // HVX quantized paths
     HTP_MM_KERNEL_HVX_QUANT_ROW,      // standard row-wise parallel quantization
@@ -655,6 +656,7 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                 act_raw_sz = hex_round_up(hex_round_up(ne10 * sizeof(float), 128) * src1_nrows, 128);
                 break;
             }
+            case HTP_MM_KERNEL_HVX_BF16_F32_VTCM:
             case HTP_MM_KERNEL_HVX_F32_F32_VTCM: {
                 size_t f32_src1_row_size = htp_mm_round_up(ne10 * 4, 128);
                 src1_sz    = htp_mm_round_up(f32_src1_row_size * src1_nrows, 256);

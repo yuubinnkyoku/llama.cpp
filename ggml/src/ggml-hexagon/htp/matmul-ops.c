@@ -2239,6 +2239,16 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
             src1_row_size          = hex_round_up(ne10 * 4, 128);
             break;
 
+        case HTP_MM_KERNEL_HVX_BF16_F32_VTCM:
+            quant_task_func        = NULL;
+            need_quant             = false;
+            mmctx->type            = "bf16-f32";
+            mmctx->vec_dot_1x1     = vec_dot_bf16_f32_aa_1x1;
+            mmctx->vec_dot_2x1     = vec_dot_bf16_f32_aa_2x1;
+            mmctx->vec_dot_2x2     = vec_dot_bf16_f32_aa_2x2;
+            src1_row_size          = hex_round_up(ne10 * 4, 128);
+            break;
+
         case HTP_MM_KERNEL_HVX_QUANT_BLOCK:
         case HTP_MM_KERNEL_HVX_QUANT_ROW:
         default:
@@ -2279,6 +2289,7 @@ static int hvx_mm_matmul(struct htp_ops_context * octx) {
 
     if (kparams->kernel_type == HTP_MM_KERNEL_HVX_F16_F16_VTCM ||
         kparams->kernel_type == HTP_MM_KERNEL_HVX_F32_F32_VTCM ||
+        kparams->kernel_type == HTP_MM_KERNEL_HVX_BF16_F32_VTCM ||
         kparams->kernel_type == HTP_MM_KERNEL_HVX_QUANT_ROW ||
         kparams->kernel_type == HTP_MM_KERNEL_HVX_QUANT_BLOCK) {
         mmctx->vtcm_src1_size_per_thread = L.src1_bytes;
