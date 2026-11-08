@@ -987,6 +987,10 @@ struct ggml_backend_sched {
     int       split_timing_capacity;
     int       split_timing_every;  // log once every N graphs, 0 = off
     int       split_timing_graphs;
+    // completion wait of the last synchronize, per backend: a backend that
+    // enqueues without blocking reports its device time here
+    int64_t   split_timing_sync_us[GGML_SCHED_MAX_BACKENDS];
+    int32_t   split_timing_sync_calls[GGML_SCHED_MAX_BACKENDS];
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -2058,6 +2062,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
             }
             sched->split_timing_calls[i] = 0;
         }
+        for (int i = 0; i < sched->n_backends; i++) {
+            const int calls = sched->split_timing_sync_calls[i];
+            if (calls == 0) {
+                continue;
+            }
+            GGML_LOG_INFO("ggml-sched-wait backend %s avg_us %lld calls %d\n",
+                          ggml_backend_name(sched->backends[i]),
+                          (long long) (sched->split_timing_sync_us[i] / calls), calls);
+            sched->split_timing_sync_us[i]    = 0;
+            sched->split_timing_sync_calls[i] = 0;
+        }
     }
 
     return GGML_STATUS_SUCCESS;
@@ -2254,8 +2269,14 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
 
 void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
+    const bool timing = sched->split_timing_every > 0;
     for (int i = 0; i < sched->n_backends; i++) {
+        const int64_t t0 = timing ? ggml_time_us() : 0;
         ggml_backend_synchronize(sched->backends[i]);
+        if (timing) {
+            sched->split_timing_sync_us[i]    += ggml_time_us() - t0;
+            sched->split_timing_sync_calls[i] += 1;
+        }
     }
     if (!sched->is_alloc) {
         // if the graph is not already allocated, always use copy 0 after a synchronization
