@@ -583,8 +583,12 @@ struct ggml_hexagon_session {
     // reset at every synchronize so one line describes one HTP split.
     uint64_t tl_submit_us = 0;
     uint64_t tl_wait_us   = 0;
+    // host time inside graph_compute that is neither publishing nor waiting: op
+    // preparation, buffer mapping and the split host shares
+    uint64_t tl_prep_us   = 0;
     uint32_t tl_batches   = 0;
     uint32_t tl_ops       = 0;
+    uint32_t tl_calls     = 0;
 
     uint64_t                cached_uid = 0;
     std::vector<htp_opnode> cached_nodes;
@@ -8669,8 +8673,36 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     return GGML_STATUS_SUCCESS;
 }
 
+// Counts the host time of one graph_compute call that is not publishing or
+// waiting, so the timeline line can show where an HTP split really spends it.
+struct hex_timeline_scope {
+    ggml_hexagon_session * s    = nullptr;
+    uint64_t               t0   = 0;
+    uint64_t               sub0 = 0;
+    uint64_t               wt0  = 0;
+
+    ~hex_timeline_scope() {
+        if (!s) {
+            return;
+        }
+        const uint64_t tot = hex_now_us() - t0;
+        const uint64_t sub = s->tl_submit_us - sub0;
+        const uint64_t wt  = s->tl_wait_us - wt0;
+        s->tl_prep_us += tot > sub + wt ? tot - sub - wt : 0;
+        s->tl_calls++;
+    }
+};
+
 static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, ggml_cgraph * graph) {
     auto sess = static_cast<ggml_hexagon_session *>(backend->context);
+
+    hex_timeline_scope tl;
+    if (opt_timeline) {
+        tl.s    = sess;
+        tl.t0   = hex_now_us();
+        tl.sub0 = sess->tl_submit_us;
+        tl.wt0  = sess->tl_wait_us;
+    }
 
     if (sess->last_error > HTP_STATUS_OK) {
         return GGML_STATUS_FAILED;
@@ -8881,13 +8913,17 @@ static void ggml_backend_hexagon_synchronize(ggml_backend_t backend) {
     if (opt_timeline) {
         // One line per HTP split: how long the host spent pushing batches and
         // how long it was blocked on replies, plus the batch and op count.
-        GGML_LOG_DEBUG("ggml-hex: %s timeline t_ms %llu batches %u ops %u submit_us %llu wait_us %llu\n",
+        GGML_LOG_DEBUG("ggml-hex: %s timeline t_ms %llu batches %u ops %u submit_us %llu wait_us %llu"
+                       " prep_us %llu calls %u\n",
                        sess->c_name(), (unsigned long long) (hex_now_us() / 1000), sess->tl_batches, sess->tl_ops,
-                       (unsigned long long) sess->tl_submit_us, (unsigned long long) sess->tl_wait_us);
+                       (unsigned long long) sess->tl_submit_us, (unsigned long long) sess->tl_wait_us,
+                       (unsigned long long) sess->tl_prep_us, sess->tl_calls);
         sess->tl_submit_us = 0;
         sess->tl_wait_us   = 0;
+        sess->tl_prep_us   = 0;
         sess->tl_batches   = 0;
         sess->tl_ops       = 0;
+        sess->tl_calls     = 0;
     }
 }
 
