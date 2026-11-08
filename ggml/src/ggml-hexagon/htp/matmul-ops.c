@@ -317,7 +317,7 @@ static void htp_iq2f_tables_copy(struct htp_context * ctx) {
 #define IQ3XXS_GRID_OFFSET (((IQ2F_TABLES_END + 127) / 128) * 128)
 #define IQ3XXS_SIGN_OFFSET (((IQ3XXS_GRID_OFFSET + IQ3XXS_GRID_BYTES + 127) / 128) * 128)
 #define IQ3XXS_SCRATCH_OFFSET (((IQ3XXS_SIGN_OFFSET + IQ3XXS_SIGNS_BYTES + 127) / 128) * 128)
-#define IQ3XXS_SCRATCH_STRIDE 384
+#define IQ3XXS_SCRATCH_STRIDE 1024 // 8 gather vectors: one slot pair per group of a tile
 
 _Static_assert(sizeof(iq3xxs_grid) == IQ3XXS_GRID_BYTES, "IQ3_XXS grid size mismatch");
 _Static_assert(sizeof(ksigns_iq2xs) == IQ3XXS_SIGNS_BYTES, "IQ3_XXS sign table size mismatch");
@@ -366,7 +366,7 @@ void htp_iq3xxs_grid_refresh(struct htp_context * ctx) {
 #define IQ3S_GRID_BYTES 2048
 #define IQ3S_GRID_OFFSET (((IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS + 127) / 128) * 128)
 #define IQ3S_SCRATCH_OFFSET (((IQ3S_GRID_OFFSET + IQ3S_GRID_BYTES + 127) / 128) * 128)
-#define IQ3S_SCRATCH_STRIDE 256
+#define IQ3S_SCRATCH_STRIDE 1024 // 8 gather vectors: one slot pair per group of a tile
 
 _Static_assert(sizeof(iq3s_grid) == IQ3S_GRID_BYTES, "IQ3_S grid size mismatch");
 _Static_assert(IQ3S_GRID_OFFSET >= IQ3XXS_SCRATCH_OFFSET + IQ3XXS_SCRATCH_STRIDE * HTP_MAX_NTHREADS,

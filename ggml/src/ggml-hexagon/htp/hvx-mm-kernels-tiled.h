@@ -1144,15 +1144,19 @@ static inline HVX_Vector iq3_xxs_sign_mask_arith(HVX_Vector sign_index) {
     return Q6_V_vor_VV(Q6_V_vand_VV(sign_index, Q6_V_vsplat_R(0x7F)), parity);
 }
 
-static inline HVX_VectorPair iq3_xxs_unpack_group_gather(const uint8_t * tile, HVX_Vector aux, int l,
-        const uint32_t * grid, const uint8_t * signs, HVX_Vector * restrict scratch) {
-    (void) signs;
+static inline void iq3_xxs_gather_group(const uint8_t * tile, HVX_Vector aux, int l,
+        const uint32_t * grid, HVX_Vector * restrict scratch) {
     const HVX_Vector idx0 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l)))));
     const HVX_Vector idx1 = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(hvx_vmemu(tile + 64 * l + 32)))));
-    const HVX_Vector sign_index = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(aux, 7 * l), Q6_V_vsplat_R(127));
+    (void) aux;
 
     Q6_vgather_ARMVw(&scratch[0], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx0, 2));
     Q6_vgather_ARMVw(&scratch[1], (uint32_t) (uintptr_t) grid, 1023, Q6_Vw_vasl_VwR(idx1, 2));
+}
+
+static inline HVX_VectorPair iq3_xxs_finish_group(HVX_Vector aux, int l,
+        HVX_Vector * restrict scratch) {
+    const HVX_Vector sign_index = Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(aux, 7 * l), Q6_V_vsplat_R(127));
 
     // the sign mask comes from arithmetic, not from a table gather
     HVX_Vector sign = iq3_xxs_sign_mask_arith(sign_index);
@@ -1206,8 +1210,15 @@ static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, con
             d_scale = Q6_V_vror_VR(d_pair, offsets.lane * 64);
         }
         HVX_Vector dot = Q6_V_vzero();
+        // all eight gathers of the tile before any of them is read, so their
+        // latency overlaps instead of being paid four times in a row
+        #pragma unroll
         for (int l = 0; l < 4; ++l) {
-            const HVX_VectorPair w = iq3_xxs_unpack_group_gather(tile, aux, l, grid, signs, scratch);
+            iq3_xxs_gather_group(tile, aux, l, grid, scratch + 2 * l);
+        }
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const HVX_VectorPair w = iq3_xxs_finish_group(aux, l, scratch + 2 * l);
             dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_lo_W(w), act[2 * l]);
             dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_hi_W(w), act[2 * l + 1]);
         }
@@ -1269,7 +1280,7 @@ static inline HVX_Vector iq3_s_widen_bytes(const uint8_t * p) {
     return iq3_s_widen_vector(hvx_vmemu(p));
 }
 
-static inline HVX_VectorPair iq3_s_unpack_group_gather(const uint8_t * tile, HVX_Vector qh, int l,
+static inline void iq3_s_gather_group(const uint8_t * tile, HVX_Vector qh, int l,
         const uint32_t * grid, HVX_Vector * restrict scratch) {
     HVX_Vector idx0 = iq3_s_widen_bytes(tile + HTP_IQ3S_INDEX_PLANE_OFFSET + 64 * l);
     HVX_Vector idx1 = iq3_s_widen_bytes(tile + HTP_IQ3S_INDEX_PLANE_OFFSET + 64 * l + 32);
@@ -1280,7 +1291,10 @@ static inline HVX_VectorPair iq3_s_unpack_group_gather(const uint8_t * tile, HVX
 
     Q6_vgather_ARMVw(&scratch[0], (uint32_t) (uintptr_t) grid, 2047, Q6_Vw_vasl_VwR(idx0, 2));
     Q6_vgather_ARMVw(&scratch[1], (uint32_t) (uintptr_t) grid, 2047, Q6_Vw_vasl_VwR(idx1, 2));
+}
 
+static inline HVX_VectorPair iq3_s_finish_group(const uint8_t * tile, int l,
+        HVX_Vector * restrict scratch) {
     HVX_Vector sign = iq3_s_widen_bytes(tile + HTP_IQ3S_SIGN_PLANE_OFFSET + 32 * l);
     sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 8));
     sign = Q6_V_vor_VV(sign, Q6_Vw_vasl_VwR(sign, 16));
@@ -1314,10 +1328,16 @@ static void tiled_vec_dot_iq3_s_32x1(const uint32_t n, float * restrict s, const
         const uint8_t * tile = weights + kt * HTP_MM_WEIGHT_TILE_SIZE_IQ3_S;
         const HVX_Vector * act = (const HVX_Vector *) (activation + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
         HVX_Vector qh = iq3_s_widen_bytes(tile + HTP_IQ3S_QH_PLANE_OFFSET);
-        HVX_Vector dot = Q6_V_vzero();
-        #pragma unroll(1)
+        // all eight gathers of the tile before any of them is read, so their
+        // latency overlaps instead of being paid four times in a row
+        #pragma unroll
         for (int l = 0; l < 4; ++l) {
-            HVX_VectorPair weights = iq3_s_unpack_group_gather(tile, qh, l, grid, scratch);
+            iq3_s_gather_group(tile, qh, l, grid, scratch + 2 * l);
+        }
+        HVX_Vector dot = Q6_V_vzero();
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            HVX_VectorPair weights = iq3_s_finish_group(tile, l, scratch + 2 * l);
             dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_lo_W(weights), act[2 * l]);
             dot = Q6_Vw_vrmpyacc_VwVbVb(dot, Q6_V_hi_W(weights), act[2 * l + 1]);
         }
