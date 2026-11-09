@@ -269,7 +269,7 @@ static const uint8_t __attribute__((aligned(VLEN))) kvalues_mxfp4_lut[] = {
 
 // reserve layout: codebook + LUT, then 128-aligned per-thread scratch
 #define IQ2S_SCRATCH_OFFSET (((IQ2S_GRID_BYTES + IQ2S_LUT_BYTES) + 127) & ~(size_t) 127)
-#define IQ2S_SCRATCH_STRIDE 512 // 4 gather vectors, keeps every slot 128-aligned
+#define IQ2S_SCRATCH_STRIDE 1024 // 8 gather vectors: one slot pair per group of a tile
 
 _Static_assert(sizeof(iq2s_grid) == IQ2S_GRID_BYTES, "IQ2S_GRID_BYTES mismatch");
 _Static_assert(sizeof(iq2_s_sign4_lut) == IQ2S_LUT_BYTES, "IQ2S_LUT_BYTES mismatch");

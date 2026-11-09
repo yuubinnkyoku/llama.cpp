@@ -641,59 +641,57 @@ static inline HVX_Vector iq2_s_sign_mask_arith(HVX_Vector v_off4) {
     m2 = Q6_Vw_vasl_VwR(m2, 16);
     m3 = Q6_Vw_vasl_VwR(m3, 24);
     return Q6_V_vor_VV(Q6_V_vor_VV(m0, m1), Q6_V_vor_VV(m2, m3));
-}static inline HVX_VectorPair iq2_s_unpack_group_8k_gather(const uint8_t * restrict tile, int l, const uint64_t * grid, HVX_Vector * restrict scratch) {
+}
+
+// Issue the two grid gathers of one group into its own slot pair.  Kept apart
+// from the finish step so a tile can issue every gather before reading any.
+static inline void iq2_s_gather_group(const uint8_t * restrict tile, int l, HVX_Vector v_qh,
+        const uint64_t * grid, HVX_Vector * restrict scratch) {
     const uint32_t grid_rt = (uint32_t) (uintptr_t) grid;
-    const uint32_t lut_rt  = grid_rt + IQ2S_GRID_BYTES;
     // vgather Mu is the byte offset of the last valid byte, not the region size.
     const uint32_t grid_mu = IQ2S_GRID_BYTES - 1;
-    const uint32_t lut_mu  = IQ2S_LUT_BYTES - 1;
 
-    const HVX_Vector v_idx  = hvx_vmemu(tile + 0   + l * 32);
-    const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
-    const HVX_Vector v_qh   = hvx_vmemu(tile + 256);
+    const HVX_Vector v_idx = hvx_vmemu(tile + 0 + l * 32);
 
     // grid byte offset = 8 * (idx + ((qh >> 2l) & 3) * 256)
     HVX_Vector v_off = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
         Q6_V_vand_VV(Q6_Vub_vlsr_VubR(v_qh, 2 * l), Q6_Vb_vsplat_R(3))))));
     v_off = Q6_Vw_vasl_VwR(v_off, 8);                     // high index bits * 256
-    HVX_Vector v_idx_w = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_idx))));
+    const HVX_Vector v_idx_w = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(v_idx))));
     v_off = Q6_Vw_vadd_VwVw(v_off, v_idx_w);              // full grid index
     v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *2
     v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *4
     v_off = Q6_Vw_vadd_VwVw(v_off, v_off);                // *8 -> byte offset
-    const HVX_Vector v_off_hi = Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4));
+
+    Q6_vgather_ARMVw(&scratch[0], grid_rt, grid_mu, v_off);                                      // low 4 magnitudes
+    Q6_vgather_ARMVw(&scratch[1], grid_rt, grid_mu, Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4)));   // high 4 magnitudes
+}
+
+// Turn one group's two gathered words into its signed weight pair.  The sign
+// masks come from arithmetic, not from two LUT gathers.
+static inline HVX_VectorPair iq2_s_finish_group(const uint8_t * restrict tile, int l,
+        HVX_Vector * restrict scratch) {
+    const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
 
     // sign LUT word offset = 4 * nibble (low nibble feeds w0, high feeds w1)
-    HVX_Vector v_off_s0 = Q6_Vw_vasl_VwR(
+    const HVX_Vector v_off_s0 = Q6_Vw_vasl_VwR(
         Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
             Q6_V_vand_VV(v_sign, Q6_Vb_vsplat_R(0x0f)))))), 2);
-    HVX_Vector v_off_s1 = Q6_Vw_vasl_VwR(
+    const HVX_Vector v_off_s1 = Q6_Vw_vasl_VwR(
         Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
             Q6_Vub_vlsr_VubR(v_sign, 4))))), 2);
 
-    // 2 grid gathers land in this thread's VTCM scratch slot (512 B per thread)
-    Q6_vgather_ARMVw(&scratch[0], grid_rt, grid_mu, v_off);      // low 4 magnitudes
-    Q6_vgather_ARMVw(&scratch[1], grid_rt, grid_mu, v_off_hi);   // high 4 magnitudes
-
-    const HVX_Vector g0 = scratch[0];
-    const HVX_Vector g1 = scratch[1];
-    // sign masks come from arithmetic, not from two LUT gathers
     const HVX_Vector n0 = iq2_s_sign_mask_arith(v_off_s0);
     const HVX_Vector n1 = iq2_s_sign_mask_arith(v_off_s1);
 
     const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
-    const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g0, n0), Q6_V_vand_VV(n0, v_ones));
-    const HVX_Vector v_w1 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(g1, n1), Q6_V_vand_VV(n1, v_ones));
+    const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(scratch[0], n0), Q6_V_vand_VV(n0, v_ones));
+    const HVX_Vector v_w1 = Q6_Vw_vadd_VwVw(Q6_V_vxor_VV(scratch[1], n1), Q6_V_vand_VV(n1, v_ones));
 
     return Q6_W_vcombine_VV(v_w1, v_w0);
 }
 
-static inline HVX_VectorPair iq2_s_unpack_group_8k(const uint8_t * restrict tile, int l, const uint64_t * grid, HVX_Vector * restrict scratch) {
-    // scratch is set from HTP_OPFLAGS_IQ2S_GATHER; NULL keeps the scalar path
-    if (scratch) {
-        return iq2_s_unpack_group_8k_gather(tile, l, grid, scratch);
-    }
-
+static inline HVX_VectorPair iq2_s_unpack_group_8k_scalar(const uint8_t * restrict tile, int l, const uint64_t * grid) {
     uint32_t w0[32] __attribute__((aligned(128)));
     uint32_t w1[32] __attribute__((aligned(128)));
 
@@ -772,9 +770,20 @@ static inline HVX_VectorPair accum_iq2_s_32x1(
     HVX_Vector lo = Q6_V_vzero();
     HVX_Vector hi = Q6_V_vzero();
 
+    const HVX_Vector v_qh = scratch ? hvx_vmemu(tile + 256) : Q6_V_vzero();
+    if (scratch) {
+        // all eight gathers of the tile before any of them is read, so their
+        // latency overlaps instead of being paid four times in a row
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            iq2_s_gather_group(tile, l, v_qh, grid, scratch + 2 * l);
+        }
+    }
+
     #pragma unroll
     for (int l = 0; l < 4; ++l) {
-        const HVX_VectorPair v_w = iq2_s_unpack_group_8k(tile, l, grid, scratch);
+        const HVX_VectorPair v_w = scratch ? iq2_s_finish_group(tile, l, scratch + 2 * l)
+                                           : iq2_s_unpack_group_8k_scalar(tile, l, grid);
         if (l < 2) {
             lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
             lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
@@ -801,9 +810,18 @@ static inline void accum_iq2_s_32x2(
     HVX_Vector lo1 = Q6_V_vzero();
     HVX_Vector hi1 = Q6_V_vzero();
 
+    const HVX_Vector v_qh = scratch ? hvx_vmemu(tile + 256) : Q6_V_vzero();
+    if (scratch) {
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            iq2_s_gather_group(tile, l, v_qh, grid, scratch + 2 * l);
+        }
+    }
+
     #pragma unroll
     for (int l = 0; l < 4; ++l) {
-        const HVX_VectorPair v_w = iq2_s_unpack_group_8k(tile, l, grid, scratch);
+        const HVX_VectorPair v_w = scratch ? iq2_s_finish_group(tile, l, scratch + 2 * l)
+                                           : iq2_s_unpack_group_8k_scalar(tile, l, grid);
         const HVX_Vector w0 = Q6_V_lo_W(v_w);
         const HVX_Vector w1 = Q6_V_hi_W(v_w);
 
@@ -898,7 +916,7 @@ static inline uint32_t iq2f_apply_neg4(uint32_t magnitude, uint32_t neg) {
 
 // VTCM gather path: two grid words and two sign words per group, landing in
 // the same per-thread scratch slot the IQ2_S gather uses.
-static inline HVX_VectorPair iq2f_unpack_group_8k_gather(
+static inline void iq2f_gather_group(
     const uint8_t * restrict tile, int l,
     const uint64_t * grid, uint32_t grid_bytes,
     const uint64_t * signs,
@@ -930,7 +948,10 @@ static inline HVX_VectorPair iq2f_unpack_group_8k_gather(
     Q6_vgather_ARMVw(&scratch[1], grid_rt,  grid_mu,  Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4)));
     Q6_vgather_ARMVw(&scratch[2], signs_rt, signs_mu, v_off_s);
     Q6_vgather_ARMVw(&scratch[3], signs_rt, signs_mu, Q6_Vw_vadd_VwVw(v_off_s, Q6_V_vsplat_R(4)));
+}
 
+// Turn one group's four gathered words into its signed weight pair.
+static inline HVX_VectorPair iq2f_finish_group(HVX_Vector * restrict scratch) {
     const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
     const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(
         Q6_V_vxor_VV(scratch[0], scratch[2]), Q6_V_vand_VV(scratch[2], v_ones));
@@ -941,16 +962,11 @@ static inline HVX_VectorPair iq2f_unpack_group_8k_gather(
 }
 
 // grid/signs point at .rodata when the gather flag is off and at VTCM when it
-// is on; a NULL scratch keeps the scalar lookup path.
-static inline HVX_VectorPair iq2f_unpack_group_8k(
+// is on; the scalar path is used when the scratch is NULL.
+static inline HVX_VectorPair iq2f_unpack_group_8k_scalar(
     const uint8_t * restrict tile, int l,
-    const uint64_t * grid, uint32_t grid_bytes,
-    const uint64_t * signs,
-    HVX_Vector * restrict scratch) {
-
-    if (scratch) {
-        return iq2f_unpack_group_8k_gather(tile, l, grid, grid_bytes, signs, scratch);
-    }
+    const uint64_t * grid,
+    const uint64_t * signs) {
 
     uint32_t w0[32] __attribute__((aligned(128)));
     uint32_t w1[32] __attribute__((aligned(128)));
@@ -982,15 +998,28 @@ static inline HVX_VectorPair accum_iq2f_32x1(
     HVX_Vector lo = Q6_V_vzero();
     HVX_Vector hi = Q6_V_vzero();
 
+    // two groups per pass so eight gathers are in flight at once
     #pragma unroll
-    for (int l = 0; l < 4; ++l) {
-        const HVX_VectorPair v_w = iq2f_unpack_group_8k(tile, l, grid, grid_bytes, signs, scratch);
-        if (l < 2) {
-            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
-            lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
-        } else {
-            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
-            hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
+    for (int p = 0; p < 2; ++p) {
+        if (scratch) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, signs, scratch + 4 * i);
+            }
+        }
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int l = 2 * p + i;
+            const HVX_VectorPair v_w = scratch
+                ? iq2f_finish_group(scratch + 4 * i)
+                : iq2f_unpack_group_8k_scalar(tile, l, grid, signs);
+            if (l < 2) {
+                lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+                lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
+            } else {
+                hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
+                hi = Q6_Vw_vrmpyacc_VwVbVb(hi, Q6_V_hi_W(v_w), v_act[2 * l + 1]);
+            }
         }
     }
 
@@ -1013,21 +1042,33 @@ static inline void accum_iq2f_32x2(
     HVX_Vector hi1 = Q6_V_vzero();
 
     #pragma unroll
-    for (int l = 0; l < 4; ++l) {
-        const HVX_VectorPair v_w = iq2f_unpack_group_8k(tile, l, grid, grid_bytes, signs, scratch);
-        const HVX_Vector w0 = Q6_V_lo_W(v_w);
-        const HVX_Vector w1 = Q6_V_hi_W(v_w);
+    for (int p = 0; p < 2; ++p) {
+        if (scratch) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, signs, scratch + 4 * i);
+            }
+        }
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            const int l = 2 * p + i;
+            const HVX_VectorPair v_w = scratch
+                ? iq2f_finish_group(scratch + 4 * i)
+                : iq2f_unpack_group_8k_scalar(tile, l, grid, signs);
+            const HVX_Vector w0 = Q6_V_lo_W(v_w);
+            const HVX_Vector w1 = Q6_V_hi_W(v_w);
 
-        if (l < 2) {
-            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w0, v_act0[2 * l + 0]);
-            lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w1, v_act0[2 * l + 1]);
-            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w0, v_act1[2 * l + 0]);
-            lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w1, v_act1[2 * l + 1]);
-        } else {
-            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w0, v_act0[2 * l + 0]);
-            hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w1, v_act0[2 * l + 1]);
-            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w0, v_act1[2 * l + 0]);
-            hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w1, v_act1[2 * l + 1]);
+            if (l < 2) {
+                lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w0, v_act0[2 * l + 0]);
+                lo0 = Q6_Vw_vrmpyacc_VwVbVb(lo0, w1, v_act0[2 * l + 1]);
+                lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w0, v_act1[2 * l + 0]);
+                lo1 = Q6_Vw_vrmpyacc_VwVbVb(lo1, w1, v_act1[2 * l + 1]);
+            } else {
+                hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w0, v_act0[2 * l + 0]);
+                hi0 = Q6_Vw_vrmpyacc_VwVbVb(hi0, w1, v_act0[2 * l + 1]);
+                hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w0, v_act1[2 * l + 0]);
+                hi1 = Q6_Vw_vrmpyacc_VwVbVb(hi1, w1, v_act1[2 * l + 1]);
+            }
         }
     }
 
