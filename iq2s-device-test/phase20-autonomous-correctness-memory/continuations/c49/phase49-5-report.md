@@ -71,7 +71,8 @@ cherry-pick はせず、上流にしか無い内容だけをローカルへ取�
 - スクラッチは 1024 B/thread (IQ3_S, IQ3_XXS とも)。`HTP_IQ2S_GRID_VTCM_RESERVE` 128 KB の
   中に収まり、ワーカーごとに `l` (0..HTP_MAX_NTHREADS-1) で区切られる。重複なし。
   VTCM 使用量は Phase 49 から変わっていない (確保量を増やしていない)。
-- DSP 異常 (セッション切断、ハング、センチネル異常) は今夜の 8 run で発生していない。
+- DSP 異常 (セッション切断、ハング、センチネル異常、離散的な値の化け) は今夜のモデル run 12 回で
+  発生していない。落ちたのは swap-out ガードによる停止 (exit 6) 2 回だけ。
 
 ### 3.3 スケジューラ計測
 
@@ -141,6 +142,10 @@ cherry-pick はせず、上流にしか無い内容だけをローカルへ取�
     swap-out が 1073-1139 MiB 発生し、1024 MiB ガードに掛かる。試験前の `am force-stop` で通る。
   - 負荷 (load average 6-10) が高いと CPU split が 900 ms まで伸びる。Phase 49 の 735 ms と
     比べてはいけない。
+  - **run を長くしてもばらつきは減らない。** 16 step (NGL=16、cap 1785600) を 1 回取ると
+    714-2005 ms で、3 step 目に 2005 ms の外れ値が入った。中央値は 782-787 ms で 8 step の
+    737-825 ms と同じ。ばらつきは step 数ではなく背景負荷で決まるので、長い run 1 回より
+    8 step を 4 組の方が良い。外れ値を除く規則を先に決めておくこと。
 - 手順は `hexagon-phase50.md` に固定した。実装は `p495_run.sh` (1 run、画面維持と
   背景停止を含む) と `p495_abba.sh` (交互比較、cap 変化を CAP_CHANGED として記録)。
 
@@ -199,7 +204,10 @@ MUL_MAT を重み種別に分けたもの (上位):
 | IQ3_XXS K17408 N5120 | 14 | 448.0 | 5.3% |
 | IQ3_S K17408 N5120 | 12 | 432.0 | 5.1% |
 | IQ3_S K5120 N17408 | 9 | 324.0 | 3.8% |
-| 型別小計 | | IQ2_S 1881 / IQ3_XXS 2093 / IQ2_XXS 946 / IQ2_XS 906 / IQ3_S 840 / IQ4_XS 750 / Q4_K 188 / IQ3_M 87 / 型不明 447 | |
+| 型別小計 | IQ3_XXS 2093 / IQ2_S 1881 / IQ2_XXS 946 / IQ2_XS 906 / IQ3_S 840 / IQ4_XS 750 / Q4_K 188 / IQ3_M 87 / 型不明 492 = 8183 | |
+
+型不明の 492 MiB は 1 要素あたり 0.17-0.24 バイトで、既知のブロック長と 6% 以上ずれたもの。
+K=6144 の端数か、IQ1 系の可能性があるが確認していない。
 
 CPU 側の実効帯域を `p495_cpu_matvec_test` で実測した (K=5120 N=17408 M=1、7 スレッド、
 cap 3628800 だが `scaling_cur_freq` は 1900-2500 MHz):
@@ -295,6 +303,7 @@ IQ2_XXS 0.9 GiB、IQ2_XS 0.9 GiB、IQ3_S 0.8 GiB、IQ4_XS 0.7 GiB。1 個の演�
 | NGL=0 8 step (22:19) | exit 0 だが run 途中で cap 3628800 -> 2112000。比較に使わない |
 | NGL=0 2 step (グラフダンプ) | exit 0、ノード 2024 + view 1824 |
 | ABBA 8 step x 4 (cap 1785600) | s1 CAP_CHANGED、s2/s3/s4 は同一 cap。上記 5.5 |
+| NGL=16 16 step (cap 1785600) | exit 0、中央値 782-787 ms、外れ値 2005 ms が 1 回 |
 | BF16 単体 | fail 0 |
 | sched 計測 (mix / async) | 上記 3.3 |
 | CPU matvec 帯域 | 上記 6 |
@@ -344,12 +353,13 @@ python p495_mulmat_classes.py p495-d2cpu-stderr.txt
 
 ## 11. Git 状態
 
-- ブランチ `codex/c49-perf`、HEAD `533b03638`、作業ツリー clean (この報告と Skill の
-  変更をコミットする前の状態)。
-- `533b03638` は origin と一致。Phase 49 の 5 コミットは保存済み。
+- ブランチ `codex/c49-perf`。Phase 49 の HEAD は `533b03638`、Phase 49.5 の 2 コミットを
+  積んだあとの HEAD は `b32e90cc6`。作業ツリー clean。
+- `b32e90cc6` は origin/codex/c49-perf と一致。Phase 49 の 5 コミットも保存済み。
 - メイン worktree (`llama.cpp`、`codex/phase20-htp-correctness-memory`) の未コミット 9 ファイルは
   触っていない。Phase 48 の `hexagon.md` も変更していない。
-- このフェーズのコミット: 1 件 (Skill 統合と Phase 49.5 の記録)。
+- このフェーズのコミット: 2 件 (Skill 統合と Phase 49.5 の記録、測定結果の追記)。
+  どちらも origin/codex/c49-perf へ push 済み。
 
 ## 12. 未解決と次の一手
 
