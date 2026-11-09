@@ -357,7 +357,8 @@ adb shell "cd /data/local/tmp/c46-27b; LD_LIBRARY_PATH=libs GGML_SCHED_SPLIT_TIM
 adb shell "sh /data/local/tmp/c46-27b/p495_run.sh 4 replay 0 c1cpu"
 adb shell "sh /data/local/tmp/c46-27b/p495_run.sh 4 replay 9 c3ngl9"
 adb shell "sh /data/local/tmp/c46-27b/p495_run.sh 2 noreplay 0 d2cpu 2"
-adb shell "sh /data/local/tmp/c46-27b/p495_abba.sh 4 0:a3 16:b3"
+adb shell "sh /data/local/tmp/c46-27b/p495_abba.sh 8 0:s1 16:s2 0:s3 16:s4"
+adb shell "export PROFILE_ARG=1; sh /data/local/tmp/c46-27b/p495_run.sh 5 noreplay 9 prof9"
 ```
 
 解析:
@@ -366,17 +367,19 @@ adb shell "sh /data/local/tmp/c46-27b/p495_abba.sh 4 0:a3 16:b3"
 python p495_logits_cmp.py lg-ngl0.f32 lg-ngl9.f32 4 248320
 python p495_graph_ops.py p495-d2cpu-stderr.txt
 python p495_mulmat_classes.py p495-d2cpu-stderr.txt
+python p49_ops.py p495-prof9.txt 1
 ```
 
 ## 11. Git 状態
 
-- ブランチ `codex/c49-perf`。Phase 49 の HEAD は `533b03638`、Phase 49.5 の 2 コミットを
-  積んだあとの HEAD は `b32e90cc6`。作業ツリー clean。
-- `b32e90cc6` は origin/codex/c49-perf と一致。Phase 49 の 5 コミットも保存済み。
+- ブランチ `codex/c49-perf`。Phase 49 の HEAD は `533b03638`、Phase 49.5 の 3 コミットを
+  積んだあとの HEAD は `1ac7112e2`。作業ツリー clean。
+- `1ac7112e2` は origin/codex/c49-perf と一致。Phase 49 の 5 コミットも保存済み。
 - メイン worktree (`llama.cpp`、`codex/phase20-htp-correctness-memory`) の未コミット 9 ファイルは
   触っていない。Phase 48 の `hexagon.md` も変更していない。
-- このフェーズのコミット: 2 件 (Skill 統合と Phase 49.5 の記録、測定結果の追記)。
-  どちらも origin/codex/c49-perf へ push 済み。
+- このフェーズのコミット: 3 件 (`b32e90cc6` Skill 統合と記録、`724617bf1` 同 tier の実測と
+  CPU 内訳、`1ac7112e2` IQ3 帯域の再現)。すべて push 済み。
+  強制 push、main への merge はしていない。
 
 ## 12. 未解決と次の一手
 
