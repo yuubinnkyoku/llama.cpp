@@ -39,6 +39,7 @@ Branch `codex/c50-perf`, worktree `llama.cpp-c50`, based on `048e79b50`
 | A | `a87330ad0e1739dbf7cf23c58b6935bfbc1a4b21c0d75735e608ef9e53795d49` | Phase 49.5 build (baseline) |
 | B | `c0bec5e5b713895c735d1daf6eb09232837843db1ab5b5ec5aec8fe6dd0c9de7` | A + IQ2_S batched gather |
 | C | `10483e5b07d50286be5f9ceb70dac9cc8c7da5280bfcf58688044dc26aecc55c` | B + IQ2_XS/XXS batched gather |
+| D | `288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d` | C + arithmetic sign masks for IQ2_XS/XXS |
 
 Only `libggml-htp-v81.so` changes between A, B and C. The host libraries are
 unchanged, so every A/B/C comparison swaps exactly one file.

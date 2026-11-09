@@ -914,18 +914,29 @@ static inline uint32_t iq2f_apply_neg4(uint32_t magnitude, uint32_t neg) {
     return (magnitude ^ neg) + (neg & 0x01010101u);
 }
 
-// VTCM gather path: two grid words and two sign words per group, landing in
-// the same per-thread scratch slot the IQ2_S gather uses.
+// VTCM gather path: two grid words per group.  The sign word is built with
+// arithmetic instead of two more gathers: ksigns64 is the even parity expansion
+// of a 7 bit index, so byte j (j < 7) is 0xff iff bit j is set and byte 7 is
+// 0xff iff the index has odd parity.  See continuations/c50/p50_ksigns_check.py.
+static inline HVX_Vector iq2f_sign_mask_high(HVX_Vector s) {
+    HVX_Vector f = Q6_V_vxor_VV(s, Q6_Vuw_vlsr_VuwR(s, 4));
+    f = Q6_V_vxor_VV(f, Q6_Vuw_vlsr_VuwR(f, 2));
+    f = Q6_V_vxor_VV(f, Q6_Vuw_vlsr_VuwR(f, 1));
+    // bits 4..6 to 0..2, parity into bit 3, then spread each bit into a byte
+    const HVX_Vector t = Q6_V_vor_VV(
+        Q6_V_vand_VV(Q6_Vuw_vlsr_VuwR(s, 4), Q6_V_vsplat_R(0x07)),
+        Q6_Vw_vasl_VwR(Q6_V_vand_VV(f, Q6_V_vsplat_R(1)), 3));
+    return iq2_s_sign_mask_arith(Q6_Vw_vasl_VwR(t, 2));
+}
+
 static inline void iq2f_gather_group(
     const uint8_t * restrict tile, int l,
     const uint64_t * grid, uint32_t grid_bytes,
-    const uint64_t * signs,
-    HVX_Vector * restrict scratch) {
+    HVX_Vector * restrict scratch,
+    HVX_Vector * restrict mask_lo, HVX_Vector * restrict mask_hi) {
 
-    const uint32_t grid_rt  = (uint32_t) (uintptr_t) grid;
-    const uint32_t signs_rt = (uint32_t) (uintptr_t) signs;
-    const uint32_t grid_mu  = grid_bytes - 1;
-    const uint32_t signs_mu = IQ2F_SIGNS_BYTES - 1;
+    const uint32_t grid_rt = (uint32_t) (uintptr_t) grid;
+    const uint32_t grid_mu = grid_bytes - 1;
 
     const HVX_Vector v_idx  = hvx_vmemu(tile + 0   + l * 32);
     const HVX_Vector v_sign = hvx_vmemu(tile + 128 + l * 32);
@@ -939,24 +950,24 @@ static inline void iq2f_gather_group(
     v_off = Q6_Vw_vadd_VwVw(v_off, v_off);
     v_off = Q6_Vw_vadd_VwVw(v_off, v_off);
 
-    // sign byte offset = 8 * (sign >> 1)
-    const HVX_Vector v_sidx = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
-        Q6_Vub_vlsr_VubR(v_sign, 1)))));
-    const HVX_Vector v_off_s = Q6_Vw_vasl_VwR(v_sidx, 3);
+    Q6_vgather_ARMVw(&scratch[0], grid_rt, grid_mu, v_off);
+    Q6_vgather_ARMVw(&scratch[1], grid_rt, grid_mu, Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4)));
 
-    Q6_vgather_ARMVw(&scratch[0], grid_rt,  grid_mu,  v_off);
-    Q6_vgather_ARMVw(&scratch[1], grid_rt,  grid_mu,  Q6_Vw_vadd_VwVw(v_off, Q6_V_vsplat_R(4)));
-    Q6_vgather_ARMVw(&scratch[2], signs_rt, signs_mu, v_off_s);
-    Q6_vgather_ARMVw(&scratch[3], signs_rt, signs_mu, Q6_Vw_vadd_VwVw(v_off_s, Q6_V_vsplat_R(4)));
+    const HVX_Vector s = Q6_V_lo_W(Q6_Ww_vunpack_Vh(Q6_V_lo_W(Q6_Wuh_vunpack_Vub(
+        Q6_Vub_vlsr_VubR(v_sign, 1)))));
+    *mask_lo = iq2_s_sign_mask_arith(Q6_Vw_vasl_VwR(s, 2));
+    *mask_hi = iq2f_sign_mask_high(s);
 }
 
-// Turn one group's four gathered words into its signed weight pair.
-static inline HVX_VectorPair iq2f_finish_group(HVX_Vector * restrict scratch) {
+// Turn one group's two gathered grid words and its two sign words into the
+// signed weight pair.
+static inline HVX_VectorPair iq2f_finish_group(
+        HVX_Vector * restrict scratch, HVX_Vector mask_lo, HVX_Vector mask_hi) {
     const HVX_Vector v_ones = Q6_V_vsplat_R(0x01010101);
     const HVX_Vector v_w0 = Q6_Vw_vadd_VwVw(
-        Q6_V_vxor_VV(scratch[0], scratch[2]), Q6_V_vand_VV(scratch[2], v_ones));
+        Q6_V_vxor_VV(scratch[0], mask_lo), Q6_V_vand_VV(mask_lo, v_ones));
     const HVX_Vector v_w1 = Q6_Vw_vadd_VwVw(
-        Q6_V_vxor_VV(scratch[1], scratch[3]), Q6_V_vand_VV(scratch[3], v_ones));
+        Q6_V_vxor_VV(scratch[1], mask_hi), Q6_V_vand_VV(mask_hi, v_ones));
 
     return Q6_W_vcombine_VV(v_w1, v_w0);
 }
@@ -998,20 +1009,22 @@ static inline HVX_VectorPair accum_iq2f_32x1(
     HVX_Vector lo = Q6_V_vzero();
     HVX_Vector hi = Q6_V_vzero();
 
-    // two groups per pass so eight gathers are in flight at once
+    // two groups per pass so four grid gathers are in flight at once
     #pragma unroll
     for (int p = 0; p < 2; ++p) {
+        HVX_Vector mask_lo[2], mask_hi[2];
         if (scratch) {
             #pragma unroll
             for (int i = 0; i < 2; ++i) {
-                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, signs, scratch + 4 * i);
+                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, scratch + 4 * i,
+                                  &mask_lo[i], &mask_hi[i]);
             }
         }
         #pragma unroll
         for (int i = 0; i < 2; ++i) {
             const int l = 2 * p + i;
             const HVX_VectorPair v_w = scratch
-                ? iq2f_finish_group(scratch + 4 * i)
+                ? iq2f_finish_group(scratch + 4 * i, mask_lo[i], mask_hi[i])
                 : iq2f_unpack_group_8k_scalar(tile, l, grid, signs);
             if (l < 2) {
                 lo = Q6_Vw_vrmpyacc_VwVbVb(lo, Q6_V_lo_W(v_w), v_act[2 * l + 0]);
@@ -1043,17 +1056,19 @@ static inline void accum_iq2f_32x2(
 
     #pragma unroll
     for (int p = 0; p < 2; ++p) {
+        HVX_Vector mask_lo[2], mask_hi[2];
         if (scratch) {
             #pragma unroll
             for (int i = 0; i < 2; ++i) {
-                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, signs, scratch + 4 * i);
+                iq2f_gather_group(tile, 2 * p + i, grid, grid_bytes, scratch + 4 * i,
+                                  &mask_lo[i], &mask_hi[i]);
             }
         }
         #pragma unroll
         for (int i = 0; i < 2; ++i) {
             const int l = 2 * p + i;
             const HVX_VectorPair v_w = scratch
-                ? iq2f_finish_group(scratch + 4 * i)
+                ? iq2f_finish_group(scratch + 4 * i, mask_lo[i], mask_hi[i])
                 : iq2f_unpack_group_8k_scalar(tile, l, grid, signs);
             const HVX_Vector w0 = Q6_V_lo_W(v_w);
             const HVX_Vector w1 = Q6_V_hi_W(v_w);
