@@ -19,6 +19,7 @@
 | `p495-bf16-test.log` | bf16 回帰試験の生出力 (2026-11-10 00:56) |
 | `p495-mix.err` | sched 計測 mix モードの生ログ |
 | `p495-mixoff.err` | 計測無効時のログ (sched 行が出ないことの証拠) |
+| `p495-prof9.txt` | DSP の型別 profile (NGL=9、2 step、706 op)。IQ3 の帯域の再現 |
 
 ## Git に入れない原本 (ローカルのみ)
 

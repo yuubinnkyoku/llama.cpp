@@ -10,7 +10,8 @@ TAG=${4:-run}
 SD=${5:-1}
 if [ "$NGL" = "0" ]; then OV=$BASE/libs/override-base.txt; else OV=$BASE/libs/override-l57.txt; fi
 export NGL OV REPLAY_MODE=$TOK
-export ALLOW_CAPPED=1 SCHED_DEBUG=$SD SPLIT_TIMING=1 EARLY_REL=1 TRACE=0 TIMELINE=0 PROFILE_ARG=0
+export ALLOW_CAPPED=1 SCHED_DEBUG=$SD SPLIT_TIMING=1 EARLY_REL=1 TRACE=0 TIMELINE=0
+export PROFILE_ARG=${PROFILE_ARG:-0}
 cap0() { cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null; }
 cap7() { cat /sys/devices/system/cpu/cpu7/cpufreq/scaling_max_freq 2>/dev/null; }
 mem() { awk '/^(MemAvailable|AnonPages):/{printf "%s=%s ", $1, $2}' /proc/meminfo; }
