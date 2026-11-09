@@ -24,7 +24,7 @@ cur() { cat /sys/devices/system/cpu/cpu$1/cpufreq/scaling_cur_freq 2>/dev/null; 
 memval() { awk -v k="$1" '$1==k":"{print $2}' /proc/meminfo; }
 pswpout() { awk '/^pswpout /{print $2}' /proc/vmstat; }
 tz0() { cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null; }
-batt() { dumpsys battery 2>/dev/null | awk -F': ' '/AC powered:/{a=$2} /USB powered:/{u=$2} /^  temperature:/{t=$2} /^  level:/{l=$2} END{printf "ac=%s usb=%s temp=%s level=%s", a, u, t, l}'; }
+batt() { timeout 20 dumpsys battery 2>/dev/null | awk -F': ' '/AC powered:/{a=$2} /USB powered:/{u=$2} /^  temperature:/{t=$2} /^  level:/{l=$2} END{printf "ac=%s usb=%s temp=%s level=%s", a, u, t, l}'; }
 
 SW0=$(pswpout)
 SAMPLES=$BASE/p50-$TAG.caps
@@ -58,7 +58,7 @@ echo "P50_START cap0 $(cap 0) cap7 $(cap 7) max0 $(maxcap 0) max7 $(maxcap 7)"
 echo "P50_POWER $(batt) screen_timeout $(settings get system screen_off_timeout 2>/dev/null) bright $(settings get system screen_brightness 2>/dev/null)"
 echo "P50_MEM MemAvailable $(memval MemAvailable) SwapFree $(memval SwapFree) AnonPages $(memval AnonPages) pswpout $SW0"
 echo "P50_TEMP tz0 $(tz0) load $(cut -d' ' -f1-3 /proc/loadavg) uptime $(cut -d' ' -f1 /proc/uptime)"
-echo "P50_BG $(dumpsys meminfo 2>/dev/null | sed -n '5,9p' | tr '\n' ' ')"
+echo "P50_BG $(timeout 25 dumpsys meminfo 2>/dev/null | sed -n '5,9p' | tr '\n' ' ')"
 sh $BASE/approve.sh "p50-$TAG" >/dev/null 2>&1
 WANT_SKEL=${WANT_SKEL:-} sh $BASE/run_split50.sh off "$STEPS" > $BASE/p50-$TAG.out 2>&1
 RC=$?
