@@ -1,6 +1,32 @@
 # Phase 50 measurement notes (running)
 
-Working record while the gates run. The final report is `phase50-report.md`.
+Working record while the gates run. The final report is `phase50-report.md`,
+which supersedes this file where they differ.
+
+## Round 2 addendum
+
+- NGL=16 (standard config) is the cleanest A/C control: IQ2_S 10.21 -> 14.17,
+  IQ2_XS 7.68 -> 9.61, IQ2_XXS 6.92 -> 8.57 GB/s while IQ3_S and IQ3_XXS agree
+  to 0.02% and IQ4_XS/Q2_K/Q4_K are 1.5-3.2% *faster* in the new run.  DSP time
+  440993 -> 414777 us per 4 steps, -6.55 ms per token.
+- Logits at NGL=16 are `f3a0d235...` for both skels, so the change is bit exact
+  at the standard config too.
+- Per 16-layer block the best DSP/CPU efficiency ratio is IQ3_S (6.4x) and the
+  worst is IQ2_XXS (0.7x, CPU is faster).  NGL=16 already holds the IQ3_S heavy
+  block 48-63, which is why raising NGL loses: it pushes CPU friendly types to
+  the DSP.  `p50_layer_types.py` reproduces the table from the NGL=0 dump.
+- End to end, three interleaved A/C pairs at NGL=16 with pinned replay tokens,
+  all at cap 2112000/1862400 with `P50_CAP_STABLE YES`.  The two usable pairs
+  disagree in sign, so a ~1% difference is below the resolution of an 8 step
+  run-to-run comparison.
+- `ggml-sched-split` does not carry the DSP time at `OPPOLL=0`: the CPU split
+  reports 587123 us against 342 us for the HTP split, which is the asynchronous
+  submit returning.  Do not read DSP time from that line.
+- The vendor cap survived a system_server restart (system pid changed, uptime
+  unchanged at 4.1 days) and stayed at 2112000/1862400.  A reboot is forbidden
+  while ADB is TCP only, so the fast cap stays unavailable.
+- The device is connected over wlan0 at 192.168.55.16; `100.108.106.81:37641`
+  (Tailscale) refuses connections from this host.
 
 Branch `codex/c50-perf`, worktree `llama.cpp-c50`, based on `048e79b50`
 (`codex/overnight-autonomy-phase50-checked`). HEAD after the first commit:
