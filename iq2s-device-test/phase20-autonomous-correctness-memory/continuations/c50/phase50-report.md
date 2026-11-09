@@ -382,10 +382,10 @@ NGL=24 でも -10.6%。fast cap で改善できなくても、熱制限下で大
 | BF16 K=5152 / K=96 | 2.90e-07 / 1.47e-07 |
 | IQ3 単独 | NGL=9 の 4 step logits が `5585d4ed...` とバイト一致 |
 | IQ2 単独 | NGL=9 で `5585d4ed...`、NGL=24 で `22bce4c9...` (A と C が一致) |
-| 2 step | 未測定 (今回は 4 step と 8 step のみ) |
+| 2 step | exit 0 (NGL=16 と NGL=0 の両方)、非有限 0 |
 | 4 step | exit 0、非有限 0 |
 | 8 step | exit 0 (多数)。NGL=32 と一部 NGL=24 は swap-out ガードで exit 6 |
-| 16 step | 未測定 |
+| 16 step | exit 0 (NGL=16)。step 1-15 の中央値 717.4 ms。停止が 3 回入る |
 | スケジューラ | 並行 2 スケジューラで全行 `calls 10`、`sync+copy+compute == total`、負値 0 |
 | 非同期投入 | 20 ms の job で投入側 49-73 usec、待ち側 20.9-21.4 ms。投入を実行時間に数えない |
 | 計測無効時 | `GGML_SCHED_SPLIT_TIMING=0` で `ggml-sched-` 行 0 |
