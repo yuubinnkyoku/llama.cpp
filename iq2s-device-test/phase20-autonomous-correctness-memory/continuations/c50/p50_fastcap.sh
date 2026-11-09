@@ -35,10 +35,25 @@ is_fast() { [ "$(cap0)" = "$MAX0" ] && [ "$(cap7)" = "$MAX7" ]; }
 if [ "$MODE" = "wait" ]; then
     echo "WAIT start cap0 $(cap0)/$MAX0 cap7 $(cap7)/$MAX7 tz $(tz0) max ${WAIT_MAX}s"
     waited=0
+    LOW=900000   # the Dozing step observed at 883200; below this the device is idle
     while [ "$waited" -lt "$WAIT_MAX" ]; do
         if is_fast; then
             echo "WAIT fast_at ${waited}s cap0 $(cap0) cap7 $(cap7) tz $(tz0)"
             break
+        fi
+        # The fast cap has only been seen right after waking a device that had
+        # settled at the Dozing level, so wake only in that state and re-check.
+        if [ "$(cap0)" -lt "$LOW" ] 2>/dev/null; then
+            echo "WAIT dozing_at ${waited}s cap0 $(cap0) waking"
+            input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
+            sleep 3
+            input keyevent KEYCODE_MENU >/dev/null 2>&1
+            sleep 2
+            if is_fast; then
+                echo "WAIT fast_after_wake ${waited}s cap0 $(cap0) cap7 $(cap7) tz $(tz0)"
+                break
+            fi
+            echo "WAIT wake_no_fast cap0 $(cap0)/$MAX0 cap7 $(cap7)/$MAX7"
         fi
         sleep 10
         waited=$((waited + 10))
