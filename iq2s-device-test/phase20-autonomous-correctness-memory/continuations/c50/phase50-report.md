@@ -667,13 +667,23 @@ bf16 変換ではなく層ごとの積和順序の差で、Phase 48 の時点で
 
 ## I. Git
 
-- ブランチ `codex/c50-perf`、起点 `048e79b50`。
-- コミット `f348c6100` (IQ2 gather batching)。変更は
-  `ggml/src/ggml-hexagon/htp/hvx-mm-kernels-tiled.h` と
-  `ggml/src/ggml-hexagon/htp/matmul-ops.c` の 2 ファイル。
-- この報告と測定スクリプトは `continuations/c50/` に追加する。
-- push・merge・強制push はしていない。メイン worktree の未コミット 9 ファイルは
-  触っていない。
+- ブランチ `codex/c50-perf`、起点 `048e79b50` (`codex/overnight-autonomy-phase50-checked`)。
+- ツリーは clean。push・merge・強制push はしていない (`origin/codex/c50-perf` は無い)。
+- メイン worktree の未コミット 9 ファイルは 9 のまま。Phase 49.5 の worktree は
+  `5ad8baa30` で無変更。
+
+**コードの変更は 1 ファイル 1 コミットだけ。** 残りは報告・スクリプト・Skill。
+
+| コミット | 内容 |
+|---|---|
+| `f348c6100` | `hvx-mm-kernels-tiled.h` + `matmul-ops.c`: IQ2 gather の先行発行 (skel B/C) |
+| `25b7a1841` .. `e4bd46f50` | Phase 50 の報告、測定スクリプト、profile 生ログ |
+| `bc27342cb` | `hvx-mm-kernels-tiled.h`: IQ2_XS/XXS の符号マスク算術化 (skel D) |
+| `59fca2eb8` .. `7ba44ecf4` | Skill 更新、推定子の修正、停止原因の記録 |
+
+変更ファイル (コード):
+`ggml/src/ggml-hexagon/htp/hvx-mm-kernels-tiled.h`,
+`ggml/src/ggml-hexagon/htp/matmul-ops.c` (`IQ2S_SCRATCH_STRIDE` 512 -> 1024)。
 
 ### 保存物
 
