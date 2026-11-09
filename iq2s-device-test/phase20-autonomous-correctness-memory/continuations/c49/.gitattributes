@@ -1,0 +1,6 @@
+# These files are pushed to the device and run by /system/bin/sh and python.
+# A CRLF checkout breaks them, so keep LF in the working copy as well.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.log  text eol=lf
+*.md   text eol=lf

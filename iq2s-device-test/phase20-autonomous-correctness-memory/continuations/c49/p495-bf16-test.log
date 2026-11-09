@@ -1,0 +1,29 @@
+ggml-hex: Loading driver libcdsprpc.so
+ggml-hex: FASTRPC_GET_DOMAINS[0]: type 1 id 1000 name 'nsp1000' status 1 instance-id 0
+ggml-hex: using CDSP domain: instance-id 0 id 1000 name 'nsp1000'
+ggml-hex: Hexagon backend (experimental) : allocating new registry : ndev 1
+ggml-hex: Hexagon Arch version v81, DMA64 enabled
+ggml-hex: device 0: HTP0 (phys=0, virt=0, domain=nsp1000:1000)
+ggml-hex: HTP0 allocating new session : domain 1000 phys-idx 0 virt-idx 0
+ggml-hex: HTP0 hwinfo: threads 8, hvx 8, hmx 1, vtcm 8 MB
+ggml-hex: HTP0 new session : session-id 0 domain-id 100000 uri file:///libggml-htp-v81.so?htp_iface_skel_handle_invoke&_modver=1.0&_dom=nsp1000&_session=0 handle 0xb40000778da098d0
+ggml-hex: HTP0 op batching: n-bufs 16 n-tensors 8192 n-ops 1280 vmem 3311845376
+P49BF16 device 0 name HTP0 desc Hexagon
+P49BF16 device 1 name CPU desc CPU
+P49BF16 backend HTP0 buffer_type HTP0
+P49BF16 perm map: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+P49BF16 perm bad 0
+P49BF16 bench wtype bf16 K 5120 N 48 M 1 iters 200 supported 1 per_op_us 206.1 gbs 2.38 y0 1280
+P49BF16 bench wtype f32 K 5120 N 48 M 1 iters 200 supported 1 per_op_us 281.2 gbs 3.50 y0 1280
+P49BF16 bench wtype iq3_s K 5120 N 4096 M 1 iters 20 supported 1 per_op_us 176169.7 gbs 0.05 y0 25.0092
+P49BF16 bench wtype iq3_xxs K 5120 N 4096 M 1 iters 20 supported 1 per_op_us 137679.9 gbs 0.06 y0 28.339
+P49BF16 bench wtype iq4_xs K 5120 N 4096 M 1 iters 20 supported 1 per_op_us 414.2 gbs 26.89 y0 25.9496
+P49BF16 bench wtype q4_K K 5120 N 4096 M 1 iters 20 supported 1 per_op_us 376.2 gbs 31.35 y0 23.201
+P49BF16 bench wtype iq2_s K 5120 N 4096 M 1 iters 20 supported 1 per_op_us 31044.1 gbs 0.22 y0 33.4569
+P49BF16 exact patterns 65536 checked 65536 bad 0
+P49BF16 dot m1 K 5120 N 48 M 1 seed 4660 max_abs 1.5102612e-05 max_bound 0.000626536148 max_rel 1.56e-05 rms 5.85219321e-06 rel_l2 2.19e-07 max_y 72.631 over 0 nonfinite 0 ok
+P49BF16 dot m2 K 5120 N 48 M 2 seed 22136 max_abs 1.34725684e-05 max_bound 0.000635155187 max_rel 3.65e-06 rms 5.77817463e-06 rel_l2 2.32e-07 max_y 60.9607 over 0 nonfinite 0 ok
+P49BF16 dot m3 K 5120 N 48 M 3 seed 39612 max_abs 2.3910756e-05 max_bound 0.000619819093 max_rel 0.000679 rms 5.92132345e-06 rel_l2 2.3e-07 max_y 71.2232 over 0 nonfinite 0 ok
+P49BF16 dot tailK K 5152 N 48 M 1 seed 57072 max_abs 1.68056769e-05 max_bound 0.000628217509 max_rel 3.95e-05 rms 7.40702517e-06 rel_l2 2.9e-07 max_y 79.5 over 0 nonfinite 0 ok
+P49BF16 dot small K 96 N 33 M 2 seed 4369 max_abs 1.39093027e-06 max_bound 1.34446175e-05 max_rel 3.25e-06 rms 4.52603572e-07 rel_l2 1.47e-07 max_y 7.78729 over 0 nonfinite 0 ok
+P49BF16 done fail 0

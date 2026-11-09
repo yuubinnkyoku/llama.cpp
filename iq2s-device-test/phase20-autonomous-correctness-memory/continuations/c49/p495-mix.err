@@ -1,0 +1,126 @@
+ggml-hex: Loading driver libcdsprpc.so
+ggml-hex: FASTRPC_GET_DOMAINS[0]: type 1 id 1000 name 'nsp1000' status 1 instance-id 0
+ggml-hex: using CDSP domain: instance-id 0 id 1000 name 'nsp1000'
+ggml-hex: Hexagon backend (experimental) : allocating new registry : ndev 1
+ggml-hex: Hexagon Arch version v81, DMA64 enabled
+ggml-hex: device 0: HTP0 (phys=0, virt=0, domain=nsp1000:1000)
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 13156 calls 10 sync_us 0 copy_us 0 compute_us 13156
+ggml-sched-wait backend CPU avg_us 0 calls 9
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 17379 calls 10 sync_us 0 copy_us 0 compute_us 17379
+ggml-sched-wait backend CPU avg_us 0 calls 9
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 8464 calls 10 sync_us 0 copy_us 0 compute_us 8463
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 11922 calls 10 sync_us 0 copy_us 0 compute_us 11921
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10715 calls 10 sync_us 0 copy_us 0 compute_us 10714
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 13697 calls 10 sync_us 0 copy_us 0 compute_us 13696
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11601 calls 10 sync_us 0 copy_us 0 compute_us 11601
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 9149 calls 10 sync_us 0 copy_us 0 compute_us 9149
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 12194 calls 10 sync_us 0 copy_us 0 compute_us 12193
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10410 calls 10 sync_us 0 copy_us 0 compute_us 10409
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 18715 calls 10 sync_us 0 copy_us 0 compute_us 18715
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11182 calls 10 sync_us 0 copy_us 0 compute_us 11181
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10804 calls 10 sync_us 0 copy_us 0 compute_us 10804
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 15572 calls 10 sync_us 0 copy_us 0 compute_us 15572
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 9593 calls 10 sync_us 0 copy_us 0 compute_us 9592
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 15243 calls 10 sync_us 0 copy_us 0 compute_us 15243
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 12945 calls 10 sync_us 0 copy_us 0 compute_us 12945
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 13554 calls 10 sync_us 0 copy_us 0 compute_us 13554
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10263 calls 10 sync_us 0 copy_us 0 compute_us 10263
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 9952 calls 10 sync_us 0 copy_us 0 compute_us 9952
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 13976 calls 10 sync_us 0 copy_us 0 compute_us 13975
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10394 calls 10 sync_us 0 copy_us 0 compute_us 10394
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 8800 calls 10 sync_us 0 copy_us 0 compute_us 8800
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 17624 calls 10 sync_us 0 copy_us 0 compute_us 17624
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 13961 calls 10 sync_us 0 copy_us 0 compute_us 13961
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 14750 calls 10 sync_us 0 copy_us 0 compute_us 14750
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 4826 calls 10 sync_us 0 copy_us 0 compute_us 4825
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 8081 calls 10 sync_us 0 copy_us 0 compute_us 8080
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 7973 calls 10 sync_us 0 copy_us 0 compute_us 7973
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11217 calls 10 sync_us 0 copy_us 0 compute_us 11217
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 13920 calls 10 sync_us 0 copy_us 0 compute_us 13920
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 9195 calls 10 sync_us 0 copy_us 0 compute_us 9195
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 15595 calls 10 sync_us 0 copy_us 0 compute_us 15594
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11342 calls 10 sync_us 0 copy_us 0 compute_us 11342
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 15582 calls 10 sync_us 0 copy_us 0 compute_us 15582
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11823 calls 10 sync_us 0 copy_us 0 compute_us 11823
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 7159 calls 10 sync_us 0 copy_us 0 compute_us 7159
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 9186 calls 10 sync_us 0 copy_us 0 compute_us 9186
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11977 calls 10 sync_us 0 copy_us 0 compute_us 11976
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 17207 calls 10 sync_us 0 copy_us 0 compute_us 17207
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 7656 calls 10 sync_us 0 copy_us 0 compute_us 7656
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11514 calls 10 sync_us 0 copy_us 0 compute_us 11514
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 18383 calls 10 sync_us 0 copy_us 0 compute_us 18383
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11255 calls 10 sync_us 0 copy_us 0 compute_us 11255
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 13990 calls 10 sync_us 0 copy_us 0 compute_us 13990
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 9586 calls 10 sync_us 0 copy_us 0 compute_us 9586
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 12356 calls 10 sync_us 0 copy_us 0 compute_us 12356
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 18369 calls 10 sync_us 0 copy_us 0 compute_us 18369
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 10817 calls 10 sync_us 0 copy_us 0 compute_us 10816
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 12792 calls 10 sync_us 0 copy_us 0 compute_us 12792
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 1 avg_us 11982 calls 10 sync_us 0 copy_us 0 compute_us 11981
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 4730 calls 10 sync_us 0 copy_us 0 compute_us 4730
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 358 calls 10 sync_us 0 copy_us 0 compute_us 358
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 384 calls 10 sync_us 0 copy_us 0 compute_us 384
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 460 calls 10 sync_us 0 copy_us 0 compute_us 460
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 411 calls 10 sync_us 0 copy_us 0 compute_us 411
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 411 calls 10 sync_us 0 copy_us 0 compute_us 411
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 501 calls 10 sync_us 0 copy_us 0 compute_us 501
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 1621 calls 10 sync_us 0 copy_us 0 compute_us 1620
+ggml-sched-wait backend CPU avg_us 0 calls 10
+ggml-sched-split id 0 backend CPU nodes 3 avg_us 1540 calls 10 sync_us 0 copy_us 0 compute_us 1540
+ggml-sched-wait backend CPU avg_us 0 calls 10

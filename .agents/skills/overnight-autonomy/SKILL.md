@@ -25,5 +25,8 @@ description: 夜間の /goal、自律的な開発・検証・障害対応で使�
 
 ## プロジェクト別規則
 
-Hexagon / llama.cpp の作業では、開始前に [references/hexagon.md](references/hexagon.md) も読む。Phase 49 以降は
-[references/hexagon-phase49.md](references/hexagon-phase49.md) の追加規則も読む。別案件ではその案件の引き継ぎ・安全条件を適用する。
+Hexagon / llama.cpp の作業では、開始前に [references/hexagon.md](references/hexagon.md) も読む。
+Phase 50 以降は [references/hexagon-phase50.md](references/hexagon-phase50.md) を先に読み、そこに固定した
+ベースラインと測定条件を使う。Phase 49 の作業契約は
+[references/hexagon-phase49.md](references/hexagon-phase49.md) に残す。
+別案件ではその案件の引き継ぎ・安全条件を適用する。
