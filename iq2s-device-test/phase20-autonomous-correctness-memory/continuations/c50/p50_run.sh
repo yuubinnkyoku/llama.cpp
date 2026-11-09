@@ -13,7 +13,7 @@ TOK=${2:-noreplay}
 NGL=${3:-16}
 TAG=${4:-run}
 SD=${5:-1}
-if [ "$NGL" = "0" ]; then OV=$BASE/libs/override-base.txt; else OV=$BASE/libs/override-l57.txt; fi
+if [ -n "${OV_FILE:-}" ]; then OV=$OV_FILE; elif [ "$NGL" = "0" ]; then OV=$BASE/libs/override-base.txt; else OV=$BASE/libs/override-l57.txt; fi
 export NGL OV REPLAY_MODE=$TOK
 export ALLOW_CAPPED=1 SCHED_DEBUG=$SD SPLIT_TIMING=1 EARLY_REL=1 TRACE=0 TIMELINE=0
 export PROFILE_ARG=${PROFILE_ARG:-0}
