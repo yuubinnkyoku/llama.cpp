@@ -325,6 +325,24 @@ Phase 46 以来の「ビット一致」は**同じ分割設定どうしの比較
 
 `SPLIT=1` は既定にしていない (標準構成は `SPLIT=0`)。
 
+### バックエンドの設定つまみは既に全部有効 (残された lever は無い)
+
+`ggml-hexagon.cpp` が読む環境変数を全部数え、既定値も確認した。
+**無効になっていて有効化すれば速くなる機能は残っていない。**
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `GGML_HEXAGON_OPFUSION` | **1 (全部)** | 1 で全 fusion。ALLREDUCE_ADD / RMS_NORM_MUL / MUL_MAT_ADD / MUL_MAT_NX / MUL_MAT_ID_NX / GDN_CPY |
+| `GGML_HEXAGON_NHMX` | **1** | HMX を有効 (0 で HVX のみ) |
+| `GGML_HEXAGON_FFN_OFFLOAD` | **1** | FFN の matmul を HTP に載せる |
+| `GGML_HEXAGON_OPBATCH` | 1280 | 1 batch の最大 op 数。NGL=16 の HTP 側は 898 node なので 1 batch に収まる |
+| `GGML_HEXAGON_OPQUEUE` | 32 | 保留 batch 数の上限。1 token あたり 1 batch なので十分 |
+| `GGML_HEXAGON_NHVX` | 8 | HVX スレッド (hw と同数) |
+
+**「融合を切ってみる」「HMX を有効にしてあるか確認する」といった探索は不要**。
+既定で全部入っている。実測した DSP の律速は gather の throughput であって、
+無効化された機能のせいではない。
+
 ### IQ2_XXS
 
 NGL=9 では HTP 側に現れない (CPU 層にある)。NGL=24 で初めて現れ、
@@ -552,9 +570,9 @@ fast cap で改善できなくても、熱制限下で大きく悪化する構�
 
 | 項目 | 結果 |
 |---|---|
-| BF16 変換 65,536 パターン | 一致、bad 0、順列 bad 0 |
-| BF16 M=1/2/3、K=5120 | rel_l2 2.19 / 2.32 / 2.30e-07、上界超過 0、非有限 0 |
-| BF16 K=5152 / K=96 | 2.90e-07 / 1.47e-07 |
+| BF16 変換 65,536 パターン | 一致、bad 0、順列 bad 0。**最終ビルド (skel D) で再確認** |
+| BF16 M=1/2/3、K=5120 | rel_l2 2.19 / 2.32 / 2.30e-07、上界超過 0、非有限 0 (skel D) |
+| BF16 K=5152 / K=96 | 2.90e-07 / 1.47e-07 (skel D) |
 | IQ3 単独 | NGL=9 の 4 step logits が `5585d4ed...` とバイト一致 |
 | IQ2 単独 | NGL=9 `5585d4ed...`、NGL=16 `f3a0d235...`、NGL=24 `22bce4c9...` (すべて A と C が一致。skel D も NGL=16 で `f3a0d235...` 一致) |
 | logits 比較 (CPU vs HTP) | 16 トークンで rel_l2 1.68-9.60%、max_abs 0.317-2.80、argmax 16/16 一致、非有限 0 |
