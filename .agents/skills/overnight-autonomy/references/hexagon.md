@@ -1,5 +1,7 @@
 # Hexagon / llama.cpp：夜間自律開発の追加規則
 
+> **履歴資料（Phase 48時点）**：このファイルの「BF16未実装」「CPU単独が最速」「HTPは20〜26%遅い」などはPhase 49以降には失効した旧測定・旧実装の記述です。Phase 50以降は最初に [`hexagon-phase50.md`](hexagon-phase50.md) を読み、最新のソース・実測・明示指示を優先してください。安全ガード等は引き続き適用します。
+
 ## 現在地（Phase 48）
 - 最新のPhase 48引き継ぎ (`continuations/c48/phase48-round1-dsp-analysis.md`、
   `phase48-round2-boundary-and-ratio.md`、`phase48-morning-report.md`)、現行ソース・実測・Git状態を
