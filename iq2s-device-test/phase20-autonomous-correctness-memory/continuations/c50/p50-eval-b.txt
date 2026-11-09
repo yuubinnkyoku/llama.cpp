@@ -1,0 +1,12 @@
+2026-11-09 / 2026-11-10。作業ブランチ `codex/c49-perf`、HEAD `533b03638`。
+Phase 49 の報告 (`phase49-final-report.md`, `phase49-round1..3`) は変更していない。
+判定: **READY WITH RISKS**。保存・正当性・測定基準は揃った。ただし (1) 今夜の端末は
+性能測定の環境条件を満たさず、fast cap の新しい比較値を取れなかった、(2) 27B の logits 差分が
+追加は全てテキスト (C/C++ ヘッダ、Markdown)。バイナリ、巨大ログ、鍵、個人情報、
+変更ファイル: `.agents/skills/...` 2 件、`ggml/src/ggml-backend.cpp`、
+GitHub `codex/overnight-autonomy-phase49` (`1b7c599`, `f72f222`) と、ローカルの
+「Phase 48 を上書きしない」「34 テンソル目」「HexaTrain」の 3 点だった。
+cherry-pick はせず、上流にしか無い内容だけをローカルへ取り込んだ:
+新規に `references/hexagon-phase50.md` を作り、Phase 49 の確定値と Phase 50 の測定条件・
+合格条件を書いた。`SKILL.md` は Phase 50 の資料を先に読む形へ 1 箇所だけ変更した。
+共通規則は `SKILL.md` に一本化したまま。Phase 47/48 の古い制約は復活させていない。
