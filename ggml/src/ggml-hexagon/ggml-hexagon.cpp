@@ -8598,10 +8598,16 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
     uint64_t    tw0 = 0, tw1 = 0;
     ggml_status rc  = GGML_STATUS_SUCCESS;
 
+    // The host share reads its input from device memory, and the op that writes
+    // that input may still be in flight. Join the ops submitted before this one
+    // first: the DSP runs its queue in order, so they own every input of this op.
+    tw0 = hex_now_us();
+    sess->flush_sync();
+    tw1 = hex_now_us();
+
     if (nosync) {
-        // Host share first, then the DSP share, and no host wait: the DSP runs
-        // its queue in order, so the next DSP op reads a complete output. The
-        // host only waits when a diagnostic has to read the result.
+        // Host share first, then the DSP share, and no wait for this op: the next
+        // DSP op reads the output in queue order. Only a diagnostic waits here.
         tc0 = hex_now_us();
         rc  = ggml_backend_graph_compute(cpu_be, plan->gf);
         tc1 = hex_now_us();
@@ -8615,12 +8621,14 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
             tw1 = hex_now_us();
         }
     } else {
+        // Submit first, then overlap the host share with the DSP share.
         ts0 = hex_now_us();
         sess->enqueue_op(*plan->dsp);
         sess->flush_async();
         ts1 = hex_now_us();
 
         if (seq) {
+            // serial control: the DSP share must finish before the host share
             tw0 = hex_now_us();
             sess->flush_sync();
             tw1 = hex_now_us();
@@ -8630,10 +8638,8 @@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
         rc  = ggml_backend_graph_compute(cpu_be, plan->gf);
         tc1 = hex_now_us();
 
-        if (!seq) {
-            tw0 = hex_now_us();
+        if (seq || diag) {
             sess->flush_sync();
-            tw1 = hex_now_us();
         }
     }
 
