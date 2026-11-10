@@ -367,7 +367,69 @@ CPU 区間 (約 570 ms) と重ねる必要があり、それは層の依存関�
 Phase 49 が記録した「HTP と CPU の往復 1 回 7-12 ms」を考えると、
 層を交互に配置して重なりを作る案は、往復の固定費で利得を食い潰す。
 
-## 9. 未解決事項
+## 10. 第 1 ラウンドの到達点と、次にやること
+
+### 10.1 できたこと
+
+1. Gate 0 の棚卸し: 34 本目の異常終了とされてきた記録を端末の一次資料まで遡った。
+   唯一の abort は DMA64=1 の `dspqueue_read failed: 0x2e`。747 個の run ディレクトリに
+   abort は 1 件も無い。34 本目は Phase 47 の時点で実際には分割されていなかった。
+2. Gate 1: NGL=16 で 34 本目を実際に分割した。捕捉され、`readback ndiff 0`、alias 有効。
+   非同期で decode まで到達し、異常終了しない。
+   frac 0.5 で止まったのは host share 401 MiB による swap-out ガード。
+3. 分割経路の実害を 2 つ見つけて直した。
+   - async が入力を待たずに読み、run ごとに違う logits を出していた (再現性ゼロ)。
+     修正後は再現し、`seq` とビット一致する。
+   - 分割時に node cache を捨てており、1 token あたり 163-171 ms を再構築に使っていた。
+     修正後は 39-61 ms。
+4. 分割の利得の上限を実測から見積もった: 7.5 ms/token (約 1.1%、NGL=9)。
+   op_us は 34.3 ms で、分割しない場合の DSP 33.7 ms とほぼ同じ。重なりは pre-wait に
+   食われている。
+
+### 10.2 未了
+
+- 34 本目の**行ごとの数値検証** (SPLIT_DUMP / SPLIT_DUMP_REF)。次ラウンドの最優先。
+- 27B 全体の性能比較 (off / async / seq) の有効な pair。今ラウンドの後半は
+  端末がサーマルと swap で崩れ、6 run 中 5 run がガード停止したため取得できていない。
+- pre-wait を「入力の producer だけ待つ」形にすれば 17.8 ms を削れる可能性がある。
+  ただし上限は 1.1% のまま。
+
+### 10.3 端末の状態 (2026-11-10 20:47)
+
+- cap 1555200/1382400 (vendor が強い制限側に移った)、tz0 64.2 C、load 24.25、
+  MemAvailable 9.9 GB、SwapFree 10.8 GB、cooling_device 全 0、残留プロセスなし。
+- 1 時間で 30 回近く 9.26 GB のモデルを読み込んだため、page cache と ZRAM が
+  飽和している。しばらく放置してから計測を再開する。
+- 画面は 30 秒で消灯、`stayon` は false に戻した。
+
+## 11. 再現コマンド
+
+```
+SKEL=288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d
+
+# 分割なしの基準 (NGL=16 / NGL=9、4 step replay)
+adb shell "cd /data/local/tmp/c46-27b && P51_MODE=off WANT_SKEL=$SKEL sh p51_run.sh 4 replay 16 base16 1"
+adb shell "cd /data/local/tmp/c46-27b && P51_MODE=off WANT_SKEL=$SKEL sh p51_run.sh 4 replay 9  base9 1"
+
+# 34 本目を含む分割 (host share を小さくしてガードに触れない)
+adb shell "cd /data/local/tmp/c46-27b && SPLIT_WEIGHTS=\$(cat libs/split34.txt) \
+  GGML_HEXAGON_SPLIT_CPU_ROWS=32 P51_MODE=async WANT_SKEL=$SKEL sh p51_run.sh 4 replay 16 s34 1"
+
+# 分割の内訳
+adb shell "cd /data/local/tmp/c46-27b && SPLIT_WEIGHTS=\$(cat libs/split33.txt) TRACE=1 TIMELINE=1 \
+  GGML_HEXAGON_SPLIT_CPU_FRAC=0.25 P51_MODE=async WANT_SKEL=$SKEL sh p51_run.sh 4 replay 9 t1 1"
+python p51_split_trace.py <stderr.txt>
+python p51_frac_model.py <trace.stderr> <profile.stderr> 0.25
+
+# 回文系列 (cap が動いた pair は捨てる)
+adb shell "cd /data/local/tmp/c46-27b && SPLIT_WEIGHTS=\$(cat libs/split33.txt) WANT_SKEL=$SKEL \
+  sh p51_series.sh 9 4 replay off:0 async:0.25 async:0.25 off:0"
+```
+
+`WANT_SKEL` を省くと run50.sh が Phase 49 の既定 skel を要求して `REFUSING` になる。
+`SPLIT_WEIGHTS` を省くと 1 テンソルだけの分割になる。
+
+## 12. 未解決事項
 
 - 34 本目を分割したときの**行ごとの数値検証** (CPU 行 = CPU 参照、DSP 行 = 全 DSP 参照、
   センチネル 0) は未実施。SPLIT_DUMP / SPLIT_DUMP_REF で取る。
