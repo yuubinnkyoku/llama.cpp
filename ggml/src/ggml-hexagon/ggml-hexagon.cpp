@@ -8780,8 +8780,9 @@ static ggml_status ggml_backend_hexagon_graph_compute(ggml_backend_t backend, gg
     const std::vector<htp_opnode> * nodes_ptr = nullptr;
     std::vector<htp_opnode> computed_nodes;
 
-    // Check for cache hit
-    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid && !hex_split_enabled());
+    // Check for cache hit. The split op rebuilds its kernel params and follows the
+    // current tensors on every call, so the cached node list stays valid there too.
+    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid);
     if (cache_hit) {
         nodes_ptr = &sess->cached_nodes;
     } else {
