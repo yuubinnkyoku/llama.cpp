@@ -57,7 +57,9 @@ Phase 47 の判断根拠は上記の生ログだけである。
 | c51 base | `5c55b585dd7378316d59da8245c9f87dd72c5eea250a7f313462349c281b4da7` | c51 HEAD 相当、修正なし |
 | c51 async 修正のみ | `67b867f87cb109622adfdcfc4e92af428a0042e6a6e4e8a08cd23bc7f819badf` | bb2607d4f |
 | c51 両修正 | `c646b4db3817f6eacbdb99617289ece59cee4358f8f4b28a624b5cd9a96a6aaf` | bb2607d4f + 302685f2d |
-| 副産物 | `libggml-hexagon.so.c51` `.c51base` `.c51async` `.c51both` `.p50deployed` | 端末 `libs/` に保存済み |
+| 副産物 | `libggml-hexagon.so.c51` `.c51base` `.c51async` `.c51both` `.c51t3` `.c51final` `.p50deployed` | 端末 `libs/` に保存済み |
+| c51 3 スレッド既定 | `90e62d01ff8649e085464aaec203c2fde267a3e95db4eee4c45a615f41df9ab3` | 36b407da5 相当 |
+| c51 最終 (コメント整理後) | `44baedd81e5d7498b89430c2b9a60c612a0f14903be74de267780ab9b2c8c7e0` | 1cad3f770、端末に配備済み |
 
 skel は c51 でビルドすると `61e598ea...` になる (commit 文字列の埋め込みで変わる)。
 数値の基準を動かさないため、端末の skel は Phase 50 の D のまま固定した。
