@@ -40,30 +40,47 @@ def main():
     a, used, total = read_records(sys.argv[1])
     b, used2, total2 = read_records(sys.argv[2])
     print(f"dump {len(a)} records {total} B, ref {len(b)} records {total2} B")
+    print("record i pairs the same op of the same step; the step field is one shared")
+    print("counter, so the dump gets even values and the ref odd ones")
     if len(a) != len(b):
         print("RECORD COUNT MISMATCH")
     bad = 0
+    prefix_rows = []
+    tail_diff = 0
+    sentinel_total = 0
+    nonfinite_total = 0
     for i, ((sa, ca, va), (sb, cb, vb)) in enumerate(zip(a, b)):
-        if ca != cb or sa != sb:
-            print(f"rec {i}: shape mismatch dump {sa}/{ca} ref {sb}/{cb}")
+        if ca != cb:
+            print(f"rec {i}: shape mismatch dump {ca} ref {cb}")
             bad += 1
             continue
-        diff = [j for j in range(ca) if va[j] != vb[j]]
         sentinel = sum(1 for v in va if v == -12345.0)
         nonfinite = sum(1 for v in va if v != v or v in (float("inf"), float("-inf")))
+        sentinel_total += sentinel
+        nonfinite_total += nonfinite
+        diff = [j for j in range(ca) if va[j] != vb[j]]
         if not diff:
-            print(f"rec {i} step {sa} n {ca}: identical, sentinel {sentinel} nonfinite {nonfinite}")
+            prefix_rows.append(0)
             continue
         first, last = diff[0], diff[-1]
-        contiguous = (last - first + 1) == len(diff)
-        dmax = max(abs(va[j] - vb[j]) for j in diff)
-        print(f"rec {i} step {sa} n {ca}: {len(diff)} rows differ in [{first},{last}]"
-              f" {'contiguous prefix' if contiguous and first == 0 else 'NOT a clean prefix'}"
-              f" max |diff| {dmax:.6g} sentinel {sentinel} nonfinite {nonfinite}")
-        if not (contiguous and first == 0) or sentinel or nonfinite:
+        if (last - first + 1) != len(diff) or first != 0:
+            print(f"rec {i}: {len(diff)} rows differ in [{first},{last}], not a leading run")
+            bad += 1
+            continue
+        prefix_rows.append(len(diff))
+        for j in range(len(diff), ca):
+            if va[j] != vb[j]:
+                tail_diff += 1
+        if sentinel or nonfinite:
+            print(f"rec {i}: sentinel {sentinel} nonfinite {nonfinite}")
             bad += 1
     print()
-    print("PASS" if bad == 0 else f"FAIL {bad} records")
+    if prefix_rows:
+        print(f"records with a leading CPU-share difference: {len(prefix_rows)},"
+              f" row counts {sorted(set(prefix_rows))}")
+    print(f"rows differing outside the CPU share: {tail_diff}")
+    print(f"sentinel rows total {sentinel_total}, nonfinite values total {nonfinite_total}")
+    print("PASS" if bad == 0 and tail_diff == 0 else f"FAIL bad {bad} tail {tail_diff}")
 
 
 if __name__ == "__main__":
