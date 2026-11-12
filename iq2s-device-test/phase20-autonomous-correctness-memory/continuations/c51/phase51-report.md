@@ -482,3 +482,51 @@ SPLIT_WEIGHTS=$(cat libs/split33.txt) TRACE=1 TIMELINE=1 GGML_HEXAGON_SPLIT_CPU_
    片方の token の DSP 区間ともう片方の CPU 区間を重ねる案。層の依存関係に縛られないので
    上限は DSP 区間の割合 (NGL=9 で 9%) に近づけるが、`llama_decode` が logits を返す前に
    同期する現在の構造を、投入と回収を分ける形に変える必要がある。
+
+## 付録 A. 変更前後のコード
+
+3 つの修正はすべて `ggml/src/ggml-hexagon/ggml-hexagon.cpp` の中にある。
+
+### A.1 非同期分割の入力待ち (bb2607d4f)
+
+```diff
+@@ static ggml_status hex_split_run(ggml_hexagon_session * sess, const htp_opnode &
+     uint64_t    tw0 = 0, tw1 = 0;
+     ggml_status rc  = GGML_STATUS_SUCCESS;
+ 
++    // The host share reads its input from device memory, and the op that writes
++    // that input may still be in flight. Join the ops submitted before this one
++    // first: the DSP runs its queue in order, so they own every input of this op.
++    tw0 = hex_now_us();
++    sess->flush_sync();
++    tw1 = hex_now_us();
++
+     if (nosync) {
+@@ async 分岐の最後
+-        if (!seq) {
+-            tw0 = hex_now_us();
++        if (seq || diag) {
+             sess->flush_sync();
+-            tw1 = hex_now_us();
+         }
+```
+
+### A.2 分割時の node cache (302685f2d)
+
+```diff
+-    // Check for cache hit
+-    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid && !hex_split_enabled());
++    // Check for cache hit. The split op rebuilds its kernel params and follows the
++    // current tensors on every call, so the cached node list stays valid there too.
++    bool cache_hit = (graph->uid != 0 && sess->cached_uid == graph->uid);
+```
+
+### A.3 host シェアのスレッド既定 (5996ec0c4)
+
+```diff
+         const char * e = getenv("GGML_HEXAGON_SPLIT_THREADS");
+-        const int    n = e ? atoi(e) : 6;
++        // One host share is a few MiB, so six threads cost more than the work:
++        // 142-151 ms with three against 171-226 ms with six on the real shapes.
++        const int    n = e ? atoi(e) : 3;
+```
