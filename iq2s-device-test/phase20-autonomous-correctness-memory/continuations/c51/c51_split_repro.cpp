@@ -94,6 +94,7 @@ int main(int argc, char ** argv) {
     std::string dump;
     bool        small  = false;
     bool        chain  = true;
+    bool        replicate = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -106,6 +107,7 @@ int main(int argc, char ** argv) {
         else if (a == "--dump")    { dump = next(); }
         else if (a == "--small")   { small = true; }
         else if (a == "--nochain") { chain = false; }
+        else if (a == "--replicate") { replicate = true; }
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (n < 1 || n > k_nall) { fprintf(stderr, "--n out of range\n"); return 2; }
@@ -154,6 +156,7 @@ int main(int argc, char ** argv) {
     printf("device %s : %s\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
     printf("mode %s n %d repeats %d rows %d frac %.4f chain %d dump %s\n", mode.c_str(), n,
             repeats, rows, frac, (int) chain, dump.empty() ? "none" : dump.c_str());
+    printf("replicate %d\n", (int) replicate);
 
     ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(dev);
     ggml_backend_t             be   = ggml_backend_dev_init(dev, nullptr);
@@ -174,14 +177,21 @@ int main(int argc, char ** argv) {
     ggml_backend_buffer_set_usage(wbuf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
     size_t wbytes = 0;
-    for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n; i++) {
         ggml_tensor * t  = w[i];
         const int64_t k  = t->ne[0];
         const int64_t m  = t->ne[1];
         const size_t  rb = ggml_row_size(t->type, k);
         std::vector<float> row(k);
         std::vector<uint8_t> dst(rb * m);
+        // --replicate quantizes one row and copies it to the rest. The real shapes
+        // then take seconds instead of minutes, at the cost of not noticing a row
+        // index shift; use it for the memory and boundary path only.
         for (int64_t r = 0; r < m; r++) {
+            if (replicate && r > 0) {
+                memcpy(dst.data() + r * rb, dst.data(), rb);
+                continue;
+            }
             for (int64_t c = 0; c < k; c++) {
                 uint32_t u = (uint32_t) (r * 131 + c * 7);
                 row[c] = ((u * 2654435761u) >> 9 & 0xFFFF) / 32768.0f - 1.0f;

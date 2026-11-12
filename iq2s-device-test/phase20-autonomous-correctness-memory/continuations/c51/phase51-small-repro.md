@@ -73,7 +73,28 @@ PASS
 68 record = 34 テンソル x 2 回。CPU シェアの 128 行だけが full DSP 参照と違い、
 それ以外の行は完全一致、未書き込み行 0、非有限値 0。
 
-## 3. 診断を入れると不具合が消える (重要な注意)
+## 3. 実形状でも同じ (805.82 MiB)
+
+`--replicate` は 1 行だけ量子化して残りの行にコピーする。実形状
+(`m = 5120 / 10240 / 17408`) でも数秒で回せるようにするためである。
+行の中身が同じなので行番号のずれは検出できない。メモリ経路と境界の確認用。
+
+```
+$ ./c51_split_repro --mode async --replicate --repeats 2
+weights 34, 805.82 MiB set
+graph nodes 68
+REPEAT 0 status 0 hash 7305aed116d7cd83 nonfinite 0
+REPEAT 1 status 0 hash 7305aed116d7cd83 nonfinite 0
+
+$ ./c51_split_repro --mode seq --replicate --repeats 2
+REPEAT 0 status 0 hash 7305aed116d7cd83 nonfinite 0
+REPEAT 1 status 0 hash 7305aed116d7cd83 nonfinite 0
+```
+
+実形状 805.82 MiB でも async は 1 回目から seq とビット一致する。
+行番号の検証は 2.3 の実モデル dump (136 record、CPU シェアの外で差分行 0) が担う。
+
+## 4. 診断を入れると不具合が消える (重要な注意)
 
 同じ修正前 lib で `--dump` を付けると、2 回のハッシュが**どちらも** `a638f0e6` に
 なって再現しなくなる。
@@ -86,14 +107,14 @@ CPU シェアが読む入力が確定してしまう。
 Phase 51 の指示書 5.1 の「診断処理自体が競合や同期関係を変える可能性があるため、
 診断あり・なしの両方を確認してください」は、まさにこの現象である。
 
-## 4. 副次的に観測したこと
+## 5. 副次的に観測したこと
 
 - 修正前 lib で `--n 1 --repeats 1` を実行すると、
   `FORTIFY: pthread_mutex_lock called on a destroyed mutex` で落ちる。
   同じ条件が修正後 lib では正常終了する (hash d073d873...)。
   終了処理の順序に依存した別の症状と思われるが、深追いしていない。
 
-## 5. 再現コマンド
+## 6. 再現コマンド
 
 ```
 # ビルド (ホスト)
@@ -116,7 +137,7 @@ cp libs/libggml-hexagon.so.c51head libs/libggml-hexagon.so   # 修正後
 LD_LIBRARY_PATH=libs ADSP_LIBRARY_PATH=libs ./c51_split_repro --mode async --repeats 3
 ```
 
-## 6. この試験の位置づけ
+## 7. この試験の位置づけ
 
 指示書 4.2 の段階に当てはめると、A (単独テンソル) から D (34 テンソル) までを
 1 つの試験で通り、E (逐次と非同期の比較) を同じ条件で行える。
