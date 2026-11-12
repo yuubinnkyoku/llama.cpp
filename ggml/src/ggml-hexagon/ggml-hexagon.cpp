@@ -8195,7 +8195,10 @@ static ggml_backend_t hex_split_cpu_backend() {
         }
         ggml_backend_t b = init();
         const char * e = getenv("GGML_HEXAGON_SPLIT_THREADS");
-        const int    n = e ? atoi(e) : 6;
+        // One host share is a few MiB, so waking six threads costs more than the work.
+        // Three threads measured 142-151 ms against 171-226 ms with six on the real
+        // 34 shapes, and the values do not depend on the count.
+        const int    n = e ? atoi(e) : 3;
         if (b && nthreads && n > 0) {
             nthreads(b, n);
         }
