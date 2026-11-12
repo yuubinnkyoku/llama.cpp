@@ -18,7 +18,7 @@ for spec in "$@"; do
     i=$((i + 1))
     MODE=${spec%%:*}
     FRAC=${spec##*:}
-    TAG=$(printf "s%d-%s-%s" "$i" "$MODE" "$FRAC")
+    TAG=$(printf "%s%d-%s-%s" "${SER_PFX:-s}" "$i" "$MODE" "$FRAC")
     export GGML_HEXAGON_SPLIT_CPU_FRAC=$FRAC
     P51_MODE=$MODE sh $BASE/p51_run.sh "$STEPS" "$TOK" "$NGL" "$TAG" 1 > $BASE/p51-series-$TAG.log 2>&1
     R=$(ls -td $BASE/runs/*/ 2>/dev/null | head -1)

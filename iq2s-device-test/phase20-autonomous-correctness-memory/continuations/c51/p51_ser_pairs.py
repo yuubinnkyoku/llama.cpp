@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Phase 51 - turn the SER lines of p51_series.sh into pairs and ratios.
 
-Each block of four runs is off, async, async, off, so run 0 pairs with run 1 and
-run 3 pairs with run 2. A pair counts only when both runs exited 0, both report a
+Runs are paired with their neighbour: off then async, or async then off. That works
+for one block of four and for several two run calls with a cooldown in between. A pair counts only when both runs exited 0, both report a
 minimum step, and both spent the run in one and the same cap tier; a run whose cap
 samples cover two tiers is dropped, because the CPU frequency decides the balance
 between the host share and the DSP share.
@@ -65,12 +65,20 @@ def main():
         print(f"{tag:16s} {r['mode']:6s} {r['exit']:4s} {r['min_ms']:8.1f} {r['swap']:8d}"
               f" {tier_of(tag)}")
 
-    # the series runs off, async, async, off per block of four
+    # pair each run with the one next to it: off then async, or async then off
     valid = []
     dropped = 0
-    for i in range(0, len(order) - 3, 4):
-        block = order[i:i + 4]
-        for off_tag, async_tag in ((block[0], block[1]), (block[3], block[2])):
+    pairs = []
+    i = 0
+    while i + 1 < len(order):
+        a, b = order[i], order[i + 1]
+        if {runs[a]["mode"], runs[b]["mode"]} == {"off", "async"}:
+            pairs.append((a, b) if runs[a]["mode"] == "off" else (b, a))
+            i += 2
+        else:
+            i += 1
+    for off_tag, async_tag in pairs:
+        if True:
             o, a = runs[off_tag], runs[async_tag]
             if o["exit"] != "0" or a["exit"] != "0" or o["min_ms"] <= 0 or a["min_ms"] <= 0:
                 dropped += 1
