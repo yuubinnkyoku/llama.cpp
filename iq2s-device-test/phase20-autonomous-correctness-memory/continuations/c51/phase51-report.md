@@ -1,0 +1,383 @@
+# Phase 51 報告書
+
+ブランチ `codex/c51-perf`、基準は Phase 50 の `8e5b850a3`。
+本文は 2026-11-12 23:35 時点の実測に基づく。未測定の項目は「未測定」と明記する。
+
+## 1. 総合判定
+
+| 項目 | 判定 | 根拠 |
+|---|---|---|
+| A. 34 テンソル目の不具合の解明 | **PARTIAL** | 現行ツリーには 34 本目固有の不具合が**存在しない**ことを行ごとの実測で示した。ただし過去に起きたとされる異常終了そのものは再現していない (実物の記録が DMA64=1 の別事象だけ) |
+| B. 並列実行の高速化 | **PARTIAL** | 行分割の費用を 1 token あたり 163-171 ms 削り、非同期経路の数値不整合を直した。27B 全体で SPLIT=0 を上回る再現性のある優位は**未確認**。上限は実測から約 1.1% と見積もられる |
+| 総合 | **PARTIAL** | A と B を独立に評価。安全性と数値正当性は維持 |
+
+B が PASS しない理由は「測れなかったから」ではなく、
+**測れる範囲で上限が 5% に届かないと分かったから**である (7 節と 8 節)。
+測定そのものが環境に阻まれた部分 (8.4) も別途明記する。
+
+## 2. 34 テンソル目の異常終了の調査結果
+
+### 2.1 実在する記録の棚卸し
+
+端末 `/data/local/tmp/c46-27b/` に Phase 46-47 の一次資料が残っていた。
+`c47` / `c48` / `c49` の主報告書は git のどのブランチにも無いため、生ログを読んだ。
+
+| 資料 | 内容 | 読み |
+|---|---|---|
+| `A.log` `A2-4.log` `B.log` `C.log` `D.log` | 単一テンソル分割、DMA64=0 | すべて rc=0、`sentinel=0`、`htp_vs_htpfull=0.000000` |
+| `E1.log` `E2.log` | 同じ試験、**DMA64=1** | `dspqueue_read failed: 0x0000002e` で abort |
+| `p47-f33/f34/f35/f5/f6-*.log` | 実モデル ABBA (ngl 9、5 step、frac 0.9) | rc=0。ただし後述 |
+| `runs/` 747 ディレクトリ | 2026-11-06 から 11-10 までの全 run | `dspqueue` 0 件、`ggml_abort` 0 件 |
+| `split33.txt` / `split34.txt` | 分割リスト | 差は `blk.63.attn_output.weight` の 1 本だけ |
+
+決定的だったのは 2 点。
+
+1. **唯一の abort は DMA64=1 のときだけ出る。** E1/E2 は A2-4 と同じ
+   1 テンソル試験で、環境変数 `GGML_HEXAGON_DMA64` だけが違う。
+   DMA64=0 では 5 回とも rc=0。**テンソル本数の関数ではない。**
+   エラーは `dspqueue_read` が返す 0x2e (AEE_EBADPARM 相当) で、
+   分割の CPU シェアを実行する前、DSP 応答待ちで起きる。
+2. **「34 本で試験した」とされた run は、実際には 33 本しか分割していなかった。**
+   `p47-f34-a-b2.log` の run ディレクトリの `c46-env.txt` を見ると
+   `SPLIT_WEIGHTS` に `blk.63.attn_output.weight` が入っておらず、stderr の
+   `split weight` 行も 33 本。ラベル `f34` はテンソル本数ではない。
+
+つまり「34 本目の異常終了」を裏付ける一次記録は存在しない。
+`P47_FAIL rc 2` は承認ファイル切れ (`REFUSING: no approval file`、経過 0.1-0.2 秒、
+run ディレクトリが前回のまま) であり、異常終了ではない。
+
+### 2.2 34 本目を実際に分割した (今回)
+
+NGL=16、skel D (`288e6712...`)、4 step replay、`split34.txt`。
+
+```
+ggml-hex: split weight blk.63.attn_output.weight (iq3_s): k 6144 m 5120 host rows 2560
+  dsp rows 2560 row 2640 B, host 6.45 MiB, dsp 6.45 MiB in 7.50 MiB at off 1032157184
+  usage 1, alias 1, r mod 32 0, readback ndiff 0 first -1, in buf 1
+```
+
+- 34 本すべて捕捉 (`SPLIT_COUNT 34`)、readback は ndiff 0、alias はモデルバッファ内。
+- frac 0.5 (host share 合計 400.93 MiB) の非同期 run は 2 回とも
+  **swap-out ガード (1.24-1.25 GiB > 1024 MiB)** で停止した。decode は step 1 まで到達し、
+  DSP エラーも `dspqueue_read` も出ていない。
+- `GGML_HEXAGON_SPLIT_CPU_ROWS=32` (host share 数 MiB) にすると 4 step 完走、exit 0。
+
+### 2.3 行ごとの数値検証 (Gate 2)
+
+`P51_DUMP=d34.bin` の診断 run (34 本、CPU_ROWS=32、NGL=16、4 step、exit 0) で、
+出力を `-12345` で汚してから両シェアに書かせ、full DSP 参照と比較した。
+
+| 検査 | 結果 |
+|---|---|
+| CPU 担当行 (32 行) が独立な CPU 再計算と一致 | **136/136** (`cpu_vs_cpuref same nonbit 0`) |
+| DSP 担当行が full DSP 参照と一致 | CPU シェアの外で**差分行 0** (136 record) |
+| 未書き込み行 (センチネル) | **0** |
+| 非有限値 | **0** |
+| 異常終了 / DSP 異常 | なし |
+
+`blk.63.attn_output.weight` の alias された tiled 領域からの行読みに、
+行番号のずれも端数も無い。**34 本目固有の境界処理の問題は無い。**
+
+### 2.4 仮説の切り分け
+
+| # | 仮説 | 判定 | 根拠 |
+|---|---|---|---|
+| 1 | バッファ寿命・所有権 | 否定 | 34 本で 4 step 完走、センチネル 0、再実行で安定 |
+| 2 | 非同期キューの順序・同期 | **肯定 (本数と無関係)** | async が入力を待たずに読み、run ごとに値が変わる。3 節で詳述 |
+| 3 | キャッシュ整合性 | 肯定 (2 と同じ機構) | 待たずに host がデバイスメモリを読む。2 の修正で解消 |
+| 4 | 行分割の境界処理 | 否定 | 2.3 の行ごと検証。先頭 32 行のみ CPU、他は DSP とビット一致 |
+| 5 | テンソル数に依存する管理構造 | 否定 | 33 本でも同じ不整合が出る (3 節)。34 本目だけの差は host share 6.45 MiB |
+| 6 | メモリ圧迫による間接的な失敗 | **肯定 (別要因)** | frac 0.5 の 400.93 MiB host share がガードに触れる。本数ではなく比率の問題 |
+| 7 | 特定の型・形状・経路 | 否定 | 34 本目は IQ3_S 6144x5120 で、33 本側の `blk.59.attn_output.weight` と同型 |
+
+## 3. 見つけて直した不具合: 非同期分割の入力待ち漏れ
+
+### 3.1 症状
+
+同じバイナリ、同じ入力で、`SPLIT=1 async` の logits が run ごとに変わる。
+NGL=9、33 本、frac 0.25、4 step replay で:
+
+| lib | mode | logits sha256 (先頭 16) |
+|---|---|---|
+| Phase 50 配備 | async | `788611da9d15a5fb` |
+| c51 修正なし | async | `9456dc7458643944` |
+| 同上を再実行 | async | `019160106423dc12` (**一致しない**) |
+| c51 修正なし | seq | `2d4693c43c0cc307` |
+| 同上を再実行 | seq | `2d4693c43c0cc307` (一致) |
+
+step 0 の logits はどの run でも完全一致し、step 1 以降が全要素で変わる
+(max |d| 3.5-4.8、argmax は 4 step 中 3 つ一致、top10 は 6-10 個一致)。
+
+### 3.2 原因
+
+`hex_split_run` の async 分岐が「DSP シェアを submit → **待たずに** CPU シェア →
+flush_sync」の順だった。CPU シェアは `plan->x_cpu->data = x->data` として
+**デバイスメモリ上の入力を直接読む**。その入力を書いた DSP op は同じバッチで
+まだ実行中かもしれず、待たずに読めば古い値とキャッシュの不整合が混ざる。
+`GGML_HEXAGON_SPLIT_NOSYNC=1` も同様 (CPU シェアを先に走らせる)。
+
+Phase 46 の合成ハーネス (`c46_split_repeat`) が `split-async.bin` と
+`split-seq.bin` の一致を確認できていたのは、入力がロード時の固定データで
+DSP の producer が無かったためである。
+
+### 3.3 修正 (commit `bb2607d4f`)
+
+`hex_split_run` の先頭で、この op より前に投入された op を join してから submit し、
+CPU シェアを DSP シェアと重ねる。
+
+```cpp
+    // The host share reads its input from device memory, and the op that writes
+    // that input may still be in flight. Join the ops submitted before this one
+    // first: the DSP runs its queue in order, so they own every input of this op.
+    tw0 = hex_now_us();
+    sess->flush_sync();
+    tw1 = hex_now_us();
+```
+
+DSP はキュー順に実行するので、先行 op を待てば入力は確定する。この op 自身の
+DSP シェアは待たないので重なりは残る。`seq` と診断時だけ CPU シェアの後にも待つ。
+
+## 4. 最小再現試験 (モデル不要)
+
+`c51_split_repro.cpp`。詳細は `phase51-small-repro.md`。
+
+- 34 本の**実名・実型・実形状**を HTP の weights バッファに作り、分割の捕捉経路を通す。
+- 各 MUL_MAT の入力の前に **SCALE を 1 本置く**。これで入力が「同じバッチの DSP op が
+  書くテンソル」になり、実モデルと同じ依存関係になる。
+- `--repeats T` で T 回計算し、毎回の出力ハッシュを出す。
+
+結果 (`--small`、34 本、3 repeat):
+
+| lib | mode | 3 回のハッシュ |
+|---|---|---|
+| 修正前 `5c55b585` | async | `64b0e335` , `a638f0e6` , `a638f0e6` |
+| 修正前 | seq | `a638f0e6` x3 |
+| 修正後 `c646b4db` | async | `a638f0e6` x3 |
+| 修正後 | seq | `a638f0e6` x3 |
+| 修正後 | off (分割なし) | `d4e8f225` x2 |
+
+**修正前は 1 回目だけ誤り、修正後は 1 回目から seq とビット一致。**
+モデルも 9 GB の読み込みも不要で、1 回 2 秒。
+
+### 4.1 診断を入れると不具合が消える
+
+同じ修正前 lib で `--dump` を付けると、ハッシュが 2 回とも `a638f0e6` になり
+再現しなくなる。診断経路が分割の前に元ノードを DSP で 1 回実行して `flush_sync`
+するため、先行 op が回収されてしまうからである。
+**診断ありの結果だけで「正常」と判断してはいけない** (指示書 5.1 の注意そのもの)。
+
+## 5. 修正内容の一覧
+
+| commit | 内容 | 検証 |
+|---|---|---|
+| `bb2607d4f` | 分割の host シェアの前に先行 DSP op を join | 小型試験で再現 -> 解消。実モデルで async == seq |
+| `302685f2d` | 分割時も HTP の node cache を使う | prep_us 163414 -> 48120。logits は変更前と一致 |
+
+`302685f2d` の根拠: 分割を有効にすると `hex_split_enabled()` が node cache を
+無効化しており、1 token ごとに 229 ops の `htp_opnode` 構築とパラメータ再計算を
+やり直していた。分割 op 自身は毎回パラメータを作り直し、テンソルの現在値も
+追い直しているので、キャッシュを使って問題ない。
+
+## 6. 行分割の数値正当性
+
+| 対象 | 結果 |
+|---|---|
+| 34 本、NGL=16、4 step、行ごと (2.3) | PASS (136 record、CPU 行ビット一致、DSP 行差分 0、センチネル 0) |
+| 33 本、NGL=9、frac 0.25、async と seq | **ビット一致** `2d4693c43c0cc307` |
+| 同、2 回実行の再現性 | 一致 |
+| 分割なしの回帰 (NGL=16) | `f3a0d235c0da32d0c40ed901b9236026...` Phase 50 の基準と一致 |
+| 分割なしの回帰 (NGL=9) | `5585d4edc47ee7505c558aeb1b929a7e` Phase 50 の基準と一致 |
+| 小型試験、34 本、2 repeat、行ごと | PASS (68 record、CPU 128 行のみ差分、他は一致) |
+
+新しい比率 (frac 0.25) の境界で、上記のとおり検証し直している。
+Phase 48-49 の比率の結果は流用していない。
+
+## 7. CPU/HTP の実際の重複時間
+
+### 7.1 1 演算の内訳 (GGML_HEXAGON_SPLIT_TRACE、33 本、NGL=9)
+
+中央値の和 (1 decode step あたり、us)。投入は 1 op あたり 40-56 us で、
+33 本合わせて約 1.5 ms/step なので表からは外した。
+
+| 構成 | cpu (host シェア) | wait | op | wait の意味 |
+|---|---|---|---|---|
+| async frac 0.5 (修正前) | 55367 | 1614 | 62498 | CPU シェアの後の DSP 待ち |
+| async frac 0.25 (修正前) | 33723 | 84 | 49302 | 同上 |
+| async frac 0.125 (修正前) | 22894 | 5082 | 49834 | 同上 |
+| async frac 0.25 (修正後) | 32879 | 17828 | 34345 | **投入前の join** |
+
+- 33 本を分割せずに DSP だけで実行した時間は **33684 us/step** (profile 実測、
+  NGL=9、skel A。IQ3_S の帯域は A と D で同一)。
+- 修正後の op 合計 34345 us は、分割しない場合とほぼ同じ。
+  **重なりは join の待ち (17828 us) に食われている。**
+- `wait_us == 0` の op は修正前 frac 0.5 で 132 中 2 本。ほぼ全 op で
+  CPU シェアが DSP シェアを隠しており、1 演算の中の重なり自体は成立している。
+
+### 7.2 HTP backend の内訳 (GGML_HEXAGON_TIMELINE、229 ops/step)
+
+| 構成 | batches | submit_us | wait_us | prep_us |
+|---|---|---|---|---|
+| 分割なし (cache 有効) | 1 | 251 | 60842 | **306** |
+| 分割あり (cache 無効) | 34 | 5917 | 17074 | **170801** |
+| 分割あり (cache 修正後) | 34 | 1670 | 24576 | **39026** |
+| 分割あり (cache + async 修正) | 62 | 3287 | 35624 | **46075** |
+
+`prep_us` は「投入でも待ちでもない host 時間」で、node 再構築と CPU シェアを含む。
+Phase 49 が記録した「分割が 11-12% 遅い」の主因はこの 163-171 ms であり、
+分割そのものの計算ではなかった。
+
+### 7.3 上限
+
+- 分割が触れるのは HTP split の DSP 区間だけ。NGL=9 で 61 ms (1 token の約 9%)。
+- 33 本の DSP 合計 D = 33.7 ms、同じ 33 本の CPU 合計 C = 118 ms。
+  最適点の op 合計は D*C/(D+C) = 26.2 ms。
+- したがって行分割の上限は 33.7 - 26.2 = **7.5 ms/token (約 1.1%)**。
+  残り 27 ms の DSP 区間は層の依存関係で分割できない。
+
+## 8. 27B 全体の性能比較
+
+### 8.1 測れたこと
+
+同一条件 (NGL=9、4 step replay、cap 2112000/1862400、skel D) の run ごとの
+最小 step (ms):
+
+| 構成 | lib | 最小 step | swap-out |
+|---|---|---|---|
+| SPLIT=0 | Phase 50 配備 | 697.5 | 43 MiB |
+| SPLIT=0 | c51 (両修正) | 660.4 / 674.9 | - |
+| async frac 0.25 | c51 (両修正) | 670.2 | - |
+| seq frac 0.25 | c51 (両修正) | 780.5 (stall 込み) | - |
+
+**この 2 組では SPLIT=0 と async の差は 1.5% 前後で、向きも定まらない。**
+指示書の合格条件 (4 組以上の有効な pair、cap が動いた run の除外) を満たしていない。
+
+### 8.2 測れなかったこと
+
+有効な 4 組を取れていない。理由は 2 つ。
+
+1. cap が 1 run の間に動く (2112000 -> 3187200 -> 1555200 -> 3033600 を観測)。
+   Phase 50 の 2 つの tier より細かく動くため、pair の多くが除外になる。
+2. 端末のメモリが run の前提 (MemAvailable 9.5 GB) を満たさない時間帯がある。
+   2026-11-12 23 時台は 8.5-9.4 GB で、ガードが run を拒否した。
+
+### 8.3 Phase 47 の記録との関係
+
+Phase 47 の生ログには、fast cap で分割が 10.4% 速いという ABBA が 17 組残っている
+(中央値 async/off = 0.896)。ただしこれは**入力待ちの無い (壊れた) 非同期経路**で
+測られた値である。値を変えずに 10% を説明できる機構は 7.3 の上限計算に無い。
+現行ツリーでは再現しないため、**性能の根拠としては使わない。**
+
+### 8.4 結論
+
+行分割で 5% は取れない。上限は約 1.1% (NGL=9)。NGL=16 では DSP 区間が
+もっと長いので上限は上がるが、Phase 50 の実測 (DSP 103 ms/token、token 635 ms)
+でも 2% 程度にしかならない。5% を出すには DSP 区間全体を CPU 区間と重ねる
+必要があり、層の依存関係 (層 49 は層 48 の出力を要る) からそれは作れない。
+
+## 9. メモリ使用量
+
+| 項目 | 実測 |
+|---|---|
+| 34 本 frac 0.5 の host share 合計 | **400.93 MiB** (`added_total_B 420392960`) |
+| 34 本目の単体 | host 6.45 MiB / dsp 6.45 MiB (alias。新規確保なし) |
+| CPU_ROWS=32 のときの 34 本合計 | 数 MiB |
+| SPLIT=0、NGL=9 の swap-out | 43 MiB |
+| SPLIT=1 frac 0.5、NGL=16 | 1.24-1.25 GiB -> **ガード停止** |
+| SPLIT=1 CPU_ROWS=32、NGL=16 | 587 MiB (SPLIT=0 と同等) |
+
+分割の host share は匿名メモリで、token ごとに読むためスワップアウトすると
+戻ってくる。ガードを作動させたのは本数ではなくこの量である。
+
+## 10. fast cap の状態
+
+| 時刻 | cap0 / cap7 | 状態 |
+|---|---|---|
+| 11-10 20:00-21:00 | 2112000 / 1862400 | 固定 (Phase 50 と同じ) |
+| 11-10 20:45-21:00 | 1555200 / 1382400 | さらに低下 |
+| 11-12 23:15 | **3628800 / 3648000** | fast cap が一時的に復帰 |
+| 11-12 23:20 | 2112000 / 1862400 | 数分で戻る |
+| 11-12 23:32 | 3033600 / 2112000 | 中間 tier |
+
+23:15 の fast cap では run を実行できなかった (MemAvailable 8.96 GB < 9.5 GB で拒否)。
+**fast cap での比較は取得できていない。** 指示書どおり、これは合格条件にしない。
+vendor 電源ポリシー、温度保護、周波数制限には一切介入していない。
+
+## 11. 生成品質への影響
+
+- 分割の計算結果は分割なしと**ビット一致しない** (CPU 行の丸めが違う)。これは
+  Phase 50 の 33 本分割と同じ扱いで、行ごとの参照一致で正当性を確認している。
+- **async は seq とビット一致する (修正後)。** つまり今回の修正で、非同期経路の
+  数値は「逐次の正しい経路」と同一になった。修正前の async は 1 token 目から
+  静かに間違っていた。
+- NLL / perplexity / 品質指標は今回**新たに測っていない**。分割なしの logits が
+  Phase 50 の基準 (`f3a0d235...` / `5585d4ed...`) と一致したため、既存の品質評価の
+  前提は変わっていない。品質指標を都合よく変更はしていない。
+
+## 12. Git
+
+| 項目 | 値 |
+|---|---|
+| ブランチ | `codex/c51-perf` |
+| 基準 | `8e5b850a3` (Phase 50 の HEAD) |
+| HEAD | `04e625e36` (本文執筆時点) |
+| コミット | 7 個 (Skill 取り込み 2、修正 2、記録 3) |
+| 状態 | clean、**未 push** |
+| メイン worktree | 未変更 (未コミット 9 ファイルはそのまま) |
+| Phase 50 worktree | `8e5b850a3` のまま |
+
+## 13. 未解決事項と再現コマンド
+
+### 未解決
+
+1. 27B 全体での 4 組以上の有効な pair (8.2)。cap とメモリの安定した窓が要る。
+2. join の待ち 17.8 ms を「入力の producer だけ待つ」形にすれば削れる可能性がある。
+   ただし上限は 1.1% のままで、費用対効果は小さい。
+3. 修正前 lib で `--n 1 --repeats 1` を実行すると
+   `FORTIFY: pthread_mutex_lock called on a destroyed mutex` で落ちる。
+   修正後は落ちない。終了処理順の別問題と思われるが未特定。
+4. `dspqueue_read` の 0x2e は DMA64=1 でのみ出る。AEE_EBADPARM と読めるが、
+   定数の定義はこの repo に無い。分割経路とは独立。
+
+### 再現コマンド
+
+`phase51-notes.md` の 11 節と `phase51-small-repro.md` の 5 節に全文がある。
+要点だけ:
+
+```
+SKEL=288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d
+cd /data/local/tmp/c46-27b
+
+# 34 本を分割して 4 step (host share を小さくしてガードに触れない)
+SPLIT_WEIGHTS=$(cat libs/split34.txt) GGML_HEXAGON_SPLIT_CPU_ROWS=32 \
+  P51_DUMP=d34.bin P51_MODE=async WANT_SKEL=$SKEL sh p51_run.sh 4 replay 16 d34 1
+
+# 行ごとの比較
+python p51_dump_cmp.py d34.bin d34.bin.ref
+
+# モデル無しの再現 (2 秒)
+LD_LIBRARY_PATH=libs ADSP_LIBRARY_PATH=libs ./c51_split_repro --mode async --small --repeats 3
+LD_LIBRARY_PATH=libs ADSP_LIBRARY_PATH=libs ./c51_split_repro --mode seq   --small --repeats 3
+
+# 内訳
+SPLIT_WEIGHTS=$(cat libs/split33.txt) TRACE=1 TIMELINE=1 GGML_HEXAGON_SPLIT_CPU_FRAC=0.25 \
+  P51_MODE=async WANT_SKEL=$SKEL sh p51_run.sh 4 replay 9 t1 1
+```
+
+## 14. Phase 52 への引き継ぎ
+
+1. **34 本目はもう怖がらなくてよい。** 34 本構成は正常に動き、行ごとの数値も
+   参照と一致する。既定を 33 本にしておく理由はもう無いが、切り替えるなら
+   Phase 50 の 33 本基準 (`1570917a...`) との比較を 1 回取ること。
+2. **分割の非同期経路は「待ってから読む」が必須。** 診断を入れると不具合が
+   消えるので、診断ありだけで正常と判断しない。小型ハーネス
+   (`c51_split_repro`) を回帰試験として使うこと。
+3. **行分割で 5% は取れない。** 上限は DSP 区間の長さで決まり、NGL=9 で 1.1%。
+   CPU/HTP の並列化で 5% を狙うなら、行分割ではなく
+   「DSP 区間を CPU 区間と重ねる」構造 (層の依存関係を跨ぐ) が要るが、
+   Phase 49 の実測では HTP<->CPU の往復 1 回が 7-12 ms で、往復を増やす案は
+   利得を食い潰す。
+4. **性能を測る前に cap とメモリの窓を確認する。** cap は 1 run の間に
+   2112000 / 3187200 / 3033600 / 1555200 と動く。MemAvailable 9.5 GB を
+   満たさないとガードが run を拒否する。
+5. 端末は 7 日連続稼働で、バッテリーが 26-29%、AC 非接続。長時間の連続 run は
+   避け、1 組ごとに冷却と充電の余裕を見ること。
