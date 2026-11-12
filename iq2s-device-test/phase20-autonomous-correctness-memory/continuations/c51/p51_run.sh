@@ -40,7 +40,10 @@ KP=$!
 SP=$!
 
 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1
-for p in com.google.android.gms com.openai.chatgpt de.mm20.launcher2.nightly com.android.vending com.google.android.apps.wellbeing com.kazumaproject.markdownhelperkeyboard com.twitter.android.piko net.waterfox.android.release org.mozilla.fenix com.nikkei.newspaper com.github.android app.alextran.immich app.morphe.android.youtube com.google.android.apps.photos com.google.android.apps.walletnfcrel dev.shiggy.cord com.google.android.googlequicksearchbox; do
+# app.morphe.android.youtube is out of this list: the owner asked to keep it alive
+# until 24:00 on 2026-11-12. The list only frees memory for a run, so leaving one
+# app in it costs room and nothing else.
+for p in com.google.android.gms com.openai.chatgpt de.mm20.launcher2.nightly com.android.vending com.google.android.apps.wellbeing com.kazumaproject.markdownhelperkeyboard com.twitter.android.piko net.waterfox.android.release org.mozilla.fenix com.nikkei.newspaper com.github.android app.alextran.immich com.google.android.apps.photos com.google.android.apps.walletnfcrel dev.shiggy.cord com.google.android.googlequicksearchbox; do
     am force-stop $p >/dev/null 2>&1
 done
 am kill-all >/dev/null 2>&1
