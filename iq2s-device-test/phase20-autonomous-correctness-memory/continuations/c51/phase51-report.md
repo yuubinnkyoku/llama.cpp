@@ -389,8 +389,8 @@ vendor 電源ポリシー、温度保護、周波数制限には一切介入し�
 |---|---|
 | ブランチ | `codex/c51-perf` |
 | 基準 | `8e5b850a3` (Phase 50 の HEAD) |
-| HEAD | `04e625e36` (本文執筆時点) |
-| コミット | 7 個 (Skill 取り込み 2、修正 2、記録 3) |
+| HEAD | `f3876045f` (本文執筆時点) |
+| コミット | 28 個 (Skill 取り込み 2、不具合修正 1、費用改善 1、スレッド改善 1、記録と解析 23) |
 | 状態 | clean、**未 push** |
 | メイン worktree | 未変更 (未コミット 9 ファイルはそのまま) |
 | Phase 50 worktree | `8e5b850a3` のまま |
@@ -398,17 +398,12 @@ vendor 電源ポリシー、温度保護、周波数制限には一切介入し�
 ## 13. 未解決事項と再現コマンド
 
 ### 未解決
-
 1. 27B 全体での 4 組以上の有効な pair (8.2)。cap とメモリの安定した窓が要る。
-   \p51_finish.sh <ngl> <pairs>\ が前提を検査してから 4 組をまとめて回す。
-   前提を満たさないときは理由を出して REFUSING で止まる。
-2. join の待ち 17.8 ms を「入力の producer だけ待つ」形にすれば削れる可能性がある。
-   ただし上限は 1.1% のままで、費用対効果は小さい。
-3. 修正前 lib で `--n 1 --repeats 1` を実行すると
-   `FORTIFY: pthread_mutex_lock called on a destroyed mutex` で落ちる。
+   `p51_finish.sh <ngl> <pairs>` が前提を検査してから 4 組をまとめて回す。前提を満たさないときは理由を出して止まる。
+2. join の待ち 17.8 ms を「入力の producer だけ待つ」形にする案は、DSP がキュー順に実行するため待ち時間が減らず、採らない (7.6)。
+3. 修正前 lib で `--n 1 --repeats 1` を実行すると `FORTIFY: pthread_mutex_lock called on a destroyed mutex` で落ちる。
    修正後は落ちない。終了処理順の別問題と思われるが未特定。
-4. `dspqueue_read` の 0x2e は DMA64=1 でのみ出る。AEE_EBADPARM と読めるが、
-   定数の定義はこの repo に無い。分割経路とは独立。
+4. `dspqueue_read` の 0x2e は DMA64=1 でのみ出る。AEE_EBADPARM と読めるが、定数の定義はこの repo に無い。分割経路とは独立。
 
 ### 再現コマンド
 
