@@ -16,6 +16,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -242,8 +243,11 @@ int main(int argc, char ** argv) {
     printf("graph nodes %d\n", ggml_graph_n_nodes(gf));
 
     for (int rep = 0; rep < repeats; rep++) {
+        auto     t0 = std::chrono::steady_clock::now();
         ggml_status st = ggml_backend_graph_compute(be, gf);
         ggml_backend_synchronize(be);
+        auto   t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         uint64_t h = 1469598103934665603ull;
         size_t   nonfinite = 0;
         for (int i = 0; i < n; i++) {
@@ -254,8 +258,8 @@ int main(int argc, char ** argv) {
             }
             h = fnv1a(yv.data(), yv.size() * sizeof(float), h);
         }
-        printf("REPEAT %d status %d hash %016llx nonfinite %zu\n", rep, (int) st,
-                (unsigned long long) h, nonfinite);
+        printf("REPEAT %d status %d hash %016llx nonfinite %zu compute_ms %.3f\n", rep,
+                (int) st, (unsigned long long) h, nonfinite, ms);
     }
 
     ggml_backend_buffer_free(abuf);
