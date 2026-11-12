@@ -137,6 +137,10 @@ CPU シェアを DSP シェアと重ねる。
 DSP はキュー順に実行するので、先行 op を待てば入力は確定する。この op 自身の
 DSP シェアは待たないので重なりは残る。`seq` と診断時だけ CPU シェアの後にも待つ。
 
+パラメータの安全性も確認した。`htp_op_batch::add_op` は `kernel_params` を
+`memcpy` でバッチ側に複製する (`ggml-hexagon.cpp:3735`)。したがって join の待ちで
+別 op のパラメータを書き換えても、飛行中の op は影響を受けない。
+
 ## 4. 最小再現試験 (モデル不要)
 
 `c51_split_repro.cpp`。詳細は `phase51-small-repro.md`。
