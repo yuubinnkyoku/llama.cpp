@@ -96,6 +96,7 @@ int main(int argc, char ** argv) {
     bool        small  = false;
     bool        chain  = true;
     bool        replicate = false;
+    int         threads = 0;   // 0 = leave the library default alone
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -109,6 +110,7 @@ int main(int argc, char ** argv) {
         else if (a == "--small")   { small = true; }
         else if (a == "--nochain") { chain = false; }
         else if (a == "--replicate") { replicate = true; }
+        else if (a == "--threads") { threads = atoi(next()); }
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (n < 1 || n > k_nall) { fprintf(stderr, "--n out of range\n"); return 2; }
@@ -122,7 +124,9 @@ int main(int argc, char ** argv) {
     setenv_or_die("GGML_HEXAGON_SPLIT",         mode == "off" ? "0" : "1");
     setenv_or_die("GGML_HEXAGON_SPLIT_SEQ",     mode == "seq" ? "1" : "0");
     setenv_or_die("GGML_HEXAGON_SPLIT_WEIGHTS", names);
-    setenv_or_die("GGML_HEXAGON_SPLIT_THREADS", "6");
+    if (threads > 0) {
+        setenv_or_die("GGML_HEXAGON_SPLIT_THREADS", std::to_string(threads));
+    }
     if (rows > 0) {
         setenv_or_die("GGML_HEXAGON_SPLIT_CPU_ROWS", std::to_string(rows));
     } else {
@@ -157,7 +161,7 @@ int main(int argc, char ** argv) {
     printf("device %s : %s\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
     printf("mode %s n %d repeats %d rows %d frac %.4f chain %d dump %s\n", mode.c_str(), n,
             repeats, rows, frac, (int) chain, dump.empty() ? "none" : dump.c_str());
-    printf("replicate %d\n", (int) replicate);
+    printf("replicate %d threads %d\n", (int) replicate, threads);
 
     ggml_backend_buffer_type_t buft = ggml_backend_dev_buffer_type(dev);
     ggml_backend_t             be   = ggml_backend_dev_init(dev, nullptr);
