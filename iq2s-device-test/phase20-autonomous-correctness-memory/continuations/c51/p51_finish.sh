@@ -22,11 +22,9 @@ refuse() { echo "REFUSING: $*"; exit 2; }
 ACT=$(sha256sum $BASE/libs/libggml-htp-v81.so | cut -d' ' -f1)
 [ "$ACT" = "$SKEL" ] || refuse "skel $ACT is not Phase 50 D"
 ps -A -o NAME | grep -q decode-probe && refuse "a decode-probe is already running"
-MEM=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
-SWAP=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
-[ "$MEM" -ge 9500000 ] || refuse "MemAvailable ${MEM} kB < 9500000 kB"
-[ "$SWAP" -ge 8000000 ] || refuse "SwapFree ${SWAP} kB < 8000000 kB"
-echo "PRE OK mem $MEM swap $SWAP skel $ACT ngl $NGL pairs $PAIRS"
+# run50.sh checks MemAvailable and SwapFree itself, after the force-stop list,
+# so this script does not pre-check them: a loaded phone can still pass.
+echo "PRE OK skel $ACT ngl $NGL pairs $PAIRS (memory is checked by run50.sh after the force stop)"
 
 i=0
 while [ "$i" -lt "$PAIRS" ]; do
