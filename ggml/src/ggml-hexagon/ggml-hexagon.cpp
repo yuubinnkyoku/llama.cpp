@@ -2921,6 +2921,12 @@ static void ggml_backend_hexagon_buffer_set_tensor_impl(ggml_backend_buffer_t bu
     auto sbuf  = (ggml_hexagon_shared_buffer *) buffer->context;
     auto sess  = sbuf->sess;
 
+    // A synchronous set_tensor must not modify bytes a pending opbatch may still
+    // read or write. The split paths used to force a backend synchronize and
+    // hid this for the common model-load case, but runtime writes (KV cache,
+    // state, LoRA) do not.
+    sess->flush_sync();
+
     if (ggml_backend_buffer_get_usage(buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
         extra->flags |= GGML_HEXAGON_TENSOR_WEIGHT;
         if (ggml_hexagon_is_repack_type(tensor->type)) {
@@ -3130,6 +3136,8 @@ static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buff
     auto extra = (ggml_hexagon_tensor_extra *)  tensor->extra;
     auto sbuf  = (ggml_hexagon_shared_buffer *) buffer->context;
     auto sess  = sbuf->sess;
+
+    sess->flush_sync();
 
     if (ggml_backend_buffer_get_usage(buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
         extra->flags |= GGML_HEXAGON_TENSOR_WEIGHT;
@@ -3346,8 +3354,12 @@ static void ggml_backend_hexagon_host_buffer_set_tensor(ggml_backend_buffer_t bu
                                                         const void *          data,
                                                         size_t                offset,
                                                         size_t                size) {
+    auto sbuf = (ggml_hexagon_shared_buffer *) buffer->context;
+    auto sess = sbuf->sess;
+
+    sess->flush_sync();
+
     memcpy((char *) tensor->data + offset, data, size);
-    GGML_UNUSED(buffer);
 }
 
 static void ggml_backend_hexagon_host_buffer_get_tensor(ggml_backend_buffer_t buffer,
