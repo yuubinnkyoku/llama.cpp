@@ -564,11 +564,13 @@ cap 3628800 / 3648000 の状態で `sh p51_finish.sh 9 4` を実行した。
 
 ### 16.2 33/34 本・split on/off の小型試験
 
-`c51_split_repro` で n=33/34、mode off/seq/async、`--small`、repeats 3。
+`c51_split_repro` で n=34、mode off/seq/async、`--small`、repeats 3。
 
 - async と seq は同一ハッシュ (`8eee2669...`、3 回とも一致)。
 - off は別ハッシュ (`76f9261c...`、行の担当が違うため当然)。
-- split 本数は n=33/34 とも全件捕捉、readback ndiff 0。
+- n=34 の split は 34 本すべて捕捉、readback ndiff 0。
+- n=33 も同じコマンド列で回す予定だったが、実行前に端末が offline になったため
+  **未測定**。33 vs 34 の比較は再開後に取り直す。
 - NGL はモデル側の変数なので、この小型試験の変数には含めない。
 
 ### 16.3 DMA64=1 の `dspqueue_read 0x2e` — 条件を固定したが未修正
@@ -583,11 +585,12 @@ cap 3628800 / 3648000 の状態で `sh p51_finish.sh 9 4` を実行した。
 | OPPOLL=1 + DMA64=1 | 0x2e ではなく **timeout (124)** |
 
 一方、`c51_split_repro` では split on + `GGML_HEXAGON_MM_SELECT=1` + DMA64=1 でも
-**再現しない** (async/seq/off、n=4/34、full/small)。したがって 0x2e は
-「分割経路一般」ではなく、`c46_split_repeat` のバッファ構成
-(WEIGHTS usage の w1/w2 + 2 buffer/opbatch) に依存する。
-原因は未特定。DMA64=1 は Phase 49 以降の既知正常条件 (DMA64=0) から外れるため、
-分割試験では引き続き DMA64=0 を使う。
+**再現しない** (async/seq/off の n=4 と n=34 `--small`、n=1 の full)。
+n=34 を full shape で回す試みは重みの構築が 180 秒を超えて timeout (124) したため、
+判定に使っていない。したがって 0x2e は「分割経路一般」ではなく、
+`c46_split_repeat` のバッファ構成 (WEIGHTS usage の w1/w2 + 2 buffer/opbatch) に
+依存する。原因は未特定。DMA64=1 は Phase 49 以降の既知正常条件 (DMA64=0) から
+外れるため、分割試験では引き続き DMA64=0 を使う。
 
 ### 16.4 `pthread_mutex_lock called on a destroyed mutex` — 再現せず
 
