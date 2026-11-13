@@ -539,6 +539,72 @@ cap 3628800 / 3648000 の状態で `sh p51_finish.sh 9 4` を実行した。
 - 34 本目は今回の対象外 (split33.txt)。34 本目の不存在確認 (§2) を
   この追試の結果で書き換えない。
 
+## 16. 2026-11-14 継続: descriptor 最小再現・新規2バグ・ABBA
+
+### 16.1 descriptor キャッシュの形状変更 — 再現した
+
+`c51_desc_repro.cpp` を追加した。同じ `ggml_tensor` オブジェクトの `ne[1]` を
+8 → 16 に変え、**synchronize を挟まず** 2 回の graph compute を同じ opbatch に
+入れる。重みは F32 なので、descriptor が古いままだと数値が一致しない。
+
+| lib | 結果 | 2 回目の shape1_diff |
+| --- | --- | ---: |
+| 修正前 `c51final` (44baedd) | **FAIL** | 8 / 16 |
+| 修正後 (descriptor 検証 + sync 入り) | **PASS** | 0 / 16 |
+
+`GGML_HEXAGON_VERBOSE=1` の `add-tensor` 列:
+
+- 修正前: 2 回目に `w` の add-tensor が**出ない**。`size 8192 : 256:8:1:1` の
+  descriptor が再利用され、DSP は 8 行のまま読む。
+- 修正後: 2 回目に `add-tensor #3 w : ... offset 0 size 16384 : 256:16:1:1` が
+  出る。新しい index と新しい offset/size が得られる。
+
+これが `e30c6b7cd` の直接の reproduction である。ただし 34 本目全体の
+異常終了を再現したものではない (16.3)。
+
+### 16.2 33/34 本・split on/off の小型試験
+
+`c51_split_repro` で n=33/34、mode off/seq/async、`--small`、repeats 3。
+
+- async と seq は同一ハッシュ (`8eee2669...`、3 回とも一致)。
+- off は別ハッシュ (`76f9261c...`、行の担当が違うため当然)。
+- split 本数は n=33/34 とも全件捕捉、readback ndiff 0。
+- NGL はモデル側の変数なので、この小型試験の変数には含めない。
+
+### 16.3 DMA64=1 の `dspqueue_read 0x2e` — 条件を固定したが未修正
+
+`c46_split_repeat` で再現:
+
+| 条件 | 結果 |
+| --- | --- |
+| DMA64=0 | rc 0 |
+| DMA64=1 | rc 134、`dspqueue_read failed: 0x2e` |
+| type f32 / iq2_s、m 512/1024/2048/17408 | DMA64=1 はすべて 0x2e |
+| OPPOLL=1 + DMA64=1 | 0x2e ではなく **timeout (124)** |
+
+一方、`c51_split_repro` では split on + `GGML_HEXAGON_MM_SELECT=1` + DMA64=1 でも
+**再現しない** (async/seq/off、n=4/34、full/small)。したがって 0x2e は
+「分割経路一般」ではなく、`c46_split_repeat` のバッファ構成
+(WEIGHTS usage の w1/w2 + 2 buffer/opbatch) に依存する。
+原因は未特定。DMA64=1 は Phase 49 以降の既知正常条件 (DMA64=0) から外れるため、
+分割試験では引き続き DMA64=0 を使う。
+
+### 16.4 `pthread_mutex_lock called on a destroyed mutex` — 再現せず
+
+`c51base` (5c55b585、修正前)、`c51final` (44baedd)、descriptor 修正後の 3 つで、
+`--n 1 --repeats 1` を off/async、full/`--small`、`--dump`/`--threads 6`/
+`--rows 32` の組み合わせで各 3 回試した。**全件 rc 0、FORTIFY なし。**
+Phase 51 の 1 回の観測は再現できなかった。修正前 lib 固有と断定はできないので、
+「未再現・原因未特定」としてクローズする。
+
+### 16.5 ABBA 追加測定 — BLOCKED
+
+端末が TCP ADB (`192.168.55.15:5555`) のみになり、その後 offline。
+再起動は禁止のため実施していない。offline 直前の状態は
+cap 3628800/3648000 (fast)、AC 非給電、battery 89 %、
+MemAvailable 6.09 GB で、27B runner の MemAvailable 9.5 GB ゲートにも
+到達していなかった。追加 pair と fast cap の CPU 単独比 -5 % は未測定。
+
 ## 付録 A. 変更前後のコード
 
 3 つの修正はすべて `ggml/src/ggml-hexagon/ggml-hexagon.cpp` の中にある。

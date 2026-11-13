@@ -136,7 +136,11 @@ int main(int argc, char ** argv) {
     }
     setenv_or_die("GGML_HEXAGON_DEVICES", "HTP0:0");
     setenv_or_die("GGML_HEXAGON_OPPOLL",  "0");
-    setenv_or_die("GGML_HEXAGON_DMA64",   "0");
+    // DMA64 is left alone when the caller already set it, so one binary can run
+    // the DMA64=0/1 comparison.
+    if (getenv("GGML_HEXAGON_DMA64") == nullptr) {
+        setenv_or_die("GGML_HEXAGON_DMA64", "0");
+    }
     setenv_or_die("GGML_HEXAGON_IQ2S_GATHER",  "1");
     setenv_or_die("GGML_HEXAGON_IQ3S_GATHER",  "1");
     setenv_or_die("GGML_HEXAGON_IQ3XXS_GATHER","1");
