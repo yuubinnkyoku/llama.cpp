@@ -3604,6 +3604,24 @@ struct ggml_hexagon_opbatch {
                (h->nb[0] == t->nb[0]) && (h->nb[1] == nb1) && (h->nb[2] == nb2) && (h->nb[3] == nb3);
     }
 
+    // A cached tensor pointer is only reusable while its descriptor still
+    // describes the same data range and shape. A ggml_tensor can be reused with
+    // new data or a new shape (graph rewrites, views, split aliases); returning
+    // the stale descriptor made the DSP read the wrong range.
+    bool is_cached_tensor(const ggml_tensor * t) const {
+        auto it = t_map.find(t);
+        if (it == t_map.end() || !t->buffer ||
+            !ggml_backend_buffer_is_hexagon(t->buffer)) {
+            return false;
+        }
+
+        const htp_tensor * h = &h_tens[it->second];
+        auto sbuf = static_cast<ggml_hexagon_shared_buffer *>(t->buffer->context);
+        const uint64_t data = (uint64_t) ((const uint8_t *) t->data - sbuf->base());
+
+        return same_shape(h, t) && h->data == data;
+    }
+
     // add tensor and return its index
     int add_tensor(const ggml_tensor * t) {
         auto extra = (ggml_hexagon_tensor_extra *) t->extra;
@@ -3616,15 +3634,16 @@ struct ggml_hexagon_opbatch {
             if (same_shape(h, t)) { return it->second; }
         }
 
-        // Lookup by tensor ptr
-        auto it = t_map.find(t);
-        if (it != t_map.end()) { return it->second; }
+        // Lookup by tensor ptr, but only if the descriptor still matches. The
+        // data+shape lookup above cannot see a pointer reuse whose data pointer
+        // also moved.
+        if (is_cached_tensor(t)) { return t_map.at(t); }
 
         // Add new tensor to the batch
         int ti = n_tens++;
         GGML_ASSERT(n_tens <= n_tens_max);
 
-        t_map.insert({t,       ti});
+        t_map[t] = ti;
         d_map.insert({t->data, ti});
 
         uint64_t t_offset = (uint8_t *) t->data - sbuf->base();
@@ -3687,7 +3706,7 @@ struct ggml_hexagon_opbatch {
 
         auto fit_tensor = [&](const ggml_tensor *t) {
             if (!t) return;
-            if (!t_map.count(t)) {
+            if (!is_cached_tensor(t)) {
                 extra_tens++;
 
                 auto sbuf = static_cast<ggml_hexagon_shared_buffer *>(t->buffer->context);
