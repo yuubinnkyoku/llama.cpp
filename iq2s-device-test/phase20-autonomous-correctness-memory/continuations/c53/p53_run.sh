@@ -32,9 +32,9 @@ SW0=$(pswpout)
 SAMPLES=$BASE/p53-$TAG.caps
 : > $SAMPLES
 
-( i=0; while [ $i -lt 40 ]; do input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; sleep 20; i=$((i+1)); done ) &
+( i=0; while [ $i -lt ${WAKE_TICKS:-120} ]; do input keyevent KEYCODE_WAKEUP >/dev/null 2>&1; sleep 20; i=$((i+1)); done ) &
 KP=$!
-( i=0; while [ $i -lt 200 ]; do echo "$(cut -d' ' -f1 /proc/uptime) $(cap 0) $(cap 7) $(cur 7) $(tz0)" >> $SAMPLES; sleep 2; i=$((i+1)); done ) &
+( i=0; while [ $i -lt ${CAP_SAMPLES:-200} ]; do echo "$(cut -d' ' -f1 /proc/uptime) $(cap 0) $(cap 7) $(cur 7) $(tz0)" >> $SAMPLES; sleep 2; i=$((i+1)); done ) &
 SP=$!
 
 input keyevent KEYCODE_WAKEUP >/dev/null 2>&1

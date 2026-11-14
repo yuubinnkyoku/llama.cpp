@@ -1,0 +1,12 @@
+A matrix multiplication of shape M by K by N reads M times K weights and K times N activations.
+When M is one, as in token generation, the arithmetic intensity is low and the operation is bound by how fast the weights can be streamed.
+When M is large, as in prompt processing, the same weights are reused across every row, so the cost per row falls.
+This is why batched evaluation ought to be much cheaper per token than single token decoding.
+The measured ratio between the two tells you how much of the reuse the implementation actually captures.
+A ratio close to one means the reuse is lost, and the cause is usually that the compute path processes rows one at a time.
+Attention adds a second term. Its cost grows with the square of the sequence length, so long prompts pay twice.
+For a sequence of n tokens the attention term is proportional to n squared per layer.
+At small n the weight streaming dominates; at large n the attention term can become comparable.
+Separating the two requires measuring the marginal cost per additional token at several lengths.
+If the marginal cost rises with length, the attention term is visible; if it is flat, it is not.
+Thermal drift during such a sweep mimics the same signature, so the clock must be recorded throughout.
