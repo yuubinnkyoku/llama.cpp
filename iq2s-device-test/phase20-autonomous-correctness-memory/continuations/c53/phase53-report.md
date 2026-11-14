@@ -428,6 +428,34 @@ probe が `-ngl 16` で動くのは、`override-l57.txt` で **85 テンソル�
 HTP に載る重みの量がまるで違うためである。`llama-cli` の `-ngl N` は「N ブロック全体」を
 HTP に載せるので、同じ 16 でも意味が違う。**§7.5 の「原因の候補 1」が正しかった。**
 
+### §7.6.1 `-ngl 4` が止まる場所の特定
+
+`-ngl 4` を 90 秒走らせ、**全スレッドの `wchan`** を取った。
+
+| スレッド数 | `wchan` | 意味 |
+| --- | --- | --- |
+| **2** | `fastrpc_wait_for_response` | **DSP の応答を待っている** |
+| 1 | `fastrpc_dspsignal_wait` | DSP のシグナル待ち |
+| 1 | `fastrpc_device_ioctl` | FastRPC の ioctl |
+| 15 | `futex_wait_queue` | 他スレッドの完了待ち |
+| 1 | `do_select` / 2 `do_sys_poll` / 1 `inet_csk_accept` | 無関係（端末側の常駐） |
+
+**つまり「重い」のではなく「DSP が返事をしない」状態で止まっている。**
+`VmRSS` は 8.04 GB で頭打ち、`MemAvailable` は 9.2 GB 残っており、**メモリ枯渇ではない。**
+`logcat` にも `dmesg` にも FastRPC / subsys / SSR のエラーは出ていない。
+
+**DSP 自体は壊れていない。** この直後に probe で 32-step を回し、
+`b21ca4bf1da8a2ef3bc48f717ee79f13acc17ced0783141211fc7178f0c2e160` が
+**既知値と一致**した（`cap0 1555200`、1.054 tok/s）。`adsprpcd` / `cdsprpcd` /
+`dspservice` も生存している。
+
+**したがって `-ngl 4` は「HTP に載せるテンソルが増えた結果、FastRPC の呼び出しが
+返らなくなる」という不具合である。** 原因（VTCM 不足か、DMA のサイズ上限か、
+特定 op の未対応か）は**特定できていない**。Phase 54 の課題として残す。
+
+**安全面の記録:** この停止は**プロセスを kill するだけで回復した**。端末の再起動は
+行っていない。DSP の異常（SSR）は発生していない。**停止線に触れる事象ではないと判断した。**
+
 ### §7.7 実用入口の実測（`-ngl 1` / `-ngl 2`）
 
 `-c 512 -b 64 -t 6 --temp 0 --no-repack --no-warmup`、`-lm mmap`、プロンプトは
@@ -869,7 +897,7 @@ Phase 52 の NLL / PPL / argmax が唯一の定量根拠。
 
 | 対象 | 状態 |
 | --- | --- |
-| `llama-cli` の `-ngl 4` 以上 | **load が完了しない**（300 s 打ち切り）。`-ngl 1` / `-ngl 2` なら動く（§7.6） |
+| `llama-cli` の `-ngl 4` 以上 | **load が完了しない**。`wchan` で `fastrpc_wait_for_response` に 2 スレッドが滞留しており、**DSP が応答を返さない**状態（§7.6.1）。メモリ枯渇でも DSP 異常でもない。`-ngl 1` / `-ngl 2` なら動く |
 | `llama-cli` の起動時間 | **約 2 分**（`-ngl 1` で 118 s 中 116 s が load）。`llama-server` は 9.3 s なので、**cli 固有のコスト**である（§7.7 / §7.9） |
 | 応答速度 | **1 ターン 48〜82 s**（サーバ経由）。実用の域に無い（§7.9） |
 | prefill の償却 | **未解決**。2〜3 倍止まり。`n_ubatch` 仮説は棄却済み（§9.6） |
@@ -891,10 +919,11 @@ Phase 52 の NLL / PPL / argmax が唯一の定量根拠。
 2. **`llama-server` を常駐させた状態での連続測定。** 起動 9.3 s は許容範囲なので、
    「サーバを立てておき、複数ターンを続ける」形での tok/s 推移・熱・メモリを取る。
    `timings` が prefill と decode を分けてくれるので、**今後の測定はサーバ経由が良い。**
-3. `-ngl 4` 以上で load が完了しない原因（`debuggerd -b` でスタック、または
-   `GGML_HEXAGON_*` のログを上げる）。**`-ngl 1` と `-ngl 4` の間で何が起きるか**は
-   HTP に載る重みの量が閾値を超える点のはずで、特定できれば `-ngl 16` の probe との
-   差も説明できる。
+3. `-ngl 4` 以上で load が完了しない原因。**`wchan` で `fastrpc_wait_for_response` に
+   2 スレッドが滞留していることまでは特定した**（§7.6.1）。次は「どのテンソルを HTP に
+   載せたときに返らなくなるか」を `-ngl 3` と `-ngl 4` の差分で絞り、FastRPC の
+   タイムアウトを有効にして（`ADSP_LIBRARY_PATH` 側の設定ではなく、呼び出し側の
+   リトライ／タイムアウト）スタックを取る。
 4. prefill の償却を分離する対照実験（同一長で attention を切る／`n_ubatch` を固定して
    長さだけ変える、を**同一 run 内**で）。
 5. 512 token の prefill を取る（`GUARD_PAGES` を上げるか、掃引の合間に
