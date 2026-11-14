@@ -1086,6 +1086,46 @@ grep P51_CAP_STABLE p51-series-*.log
 **fast cap の pair と CPU 単独比は依然未測定。** 1 本の off だけでは
 比較にならないので、判定には使わない。数値は次回の窓の参考として残す。
 
+## 20. Phase 51 最終判定 (クローズ)
+
+Phase 51 をここで閉じる。分析は各節にあり、本節は判定と参照だけを残す。
+
+### 20.1 最終判定一覧
+
+| 項目 | 判定 | 参照 |
+| --- | --- | --- |
+| 33 本 vs 34 本の比較 | **PASS** | §17.1 (async == seq、3 回再現、34 本目固有の異常なし) |
+| `dspqueue_read 0x2e` | **PASS** | §18.2-18.5 (原因特定＋修正、`ddcf2a54a`) |
+| mutex 破壊 | **CLOSED (未再現)** | §16.4 / §17.4 |
+| 同一 cap の pair 確保 | **PASS** | §19.3 (安定 tier で 4 組) |
+| 分割並列化の高速化 | **FAIL** | §19.3 (4 組すべて async が遅い、中央値 -5.25 %) |
+| fast cap の CPU 単独比 | **未測定 (保留)** | §18.7-18.8 / §19.11 (窓が 1-6 分で閉じる) |
+
+### 20.2 分割並列化の扱い
+
+**行分割のコードは保持するが、既定経路には昇格しない。** `SPLIT=0` が既定のまま。
+同一 cap の 4 組すべてで async が遅く、中央値 -5.25 % だったため。
+
+### 20.3 0x2e の修正内容
+
+skel の `matmul-ops.c` で、`op_matmul` と `op_matmul_nx` に extended mapping を
+出力に使えないようにするガードを追加した (13 行)。`op_matmul_id` 系には
+元からあったが、plain MUL_MAT の経路に無かった。修正前 skel
+`288e6712...`、修正後 `70b9ed4f...`。
+
+### 20.4 コミット一覧
+
+| commit | 内容 |
+| --- | --- |
+| `ddcf2a54a` | `fix(hexagon): refuse an extended mapping as a MUL_MAT output` |
+| `7bdcc82f8` | `test(c51): add the DMA64 output-location reproduction` |
+| `365b12be5` | `docs(c51): record the 0x2e root cause, the fix and the fast cap window` |
+| `b711127a9` | `docs(c51): record the second fast cap window and renumber the section` |
+| `712b80314` | `docs(c51): settle the split speedup at a stable thermal tier` |
+| `2ab746abc` | `docs(c51): record the third fast cap window` |
+
+ブランチ `codex/c51-perf`、HEAD `2ab746abc`、push 済み。
+
 ## 付録 A. 変更前後のコード
 
 3 つの修正はすべて `ggml/src/ggml-hexagon/ggml-hexagon.cpp` の中にある。
