@@ -1185,3 +1185,97 @@ Phase 52 の NLL / PPL / argmax が唯一の定量根拠。
    （§5.2）。
 
 
+
+---
+
+## §13 終了時の端末状態（実測、2026-11-15 04:22）
+
+| 項目 | 値 | 期待 |
+| --- | --- | --- |
+| probe | `aeaa1b6236d597cc04ad0b642074f451abb70d409b66625a2dd3083c9bd13f3f` | **元版に復元済み** |
+| probe プロセス | なし | なし |
+| skel | `288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d` | **変更なし**（Phase 50 D） |
+| replay.txt | `25358 11 198 760`（標準 4 トークン） | **復元済み** |
+| llama-cli / llama-server | なし | なし |
+| AC 給電 | true | — |
+| thermal_zone0 | 50.7 ℃ | 冷却済み |
+| uptime | 9 日 3 時間 32 分 | **再起動なし**（開始時 8 日 21 時間 34 分から継続） |
+| MemAvailable | 11,006,080 kB | 健全 |
+| AnonPages | 1,126,568 kB | 健全 |
+
+**端末の設定は一切変更していない。** `scaling_max_freq` / `thermal_zone0` は読むだけで、
+ZRAM・vendor 電源ポリシー・`system_server`・温度保護に触れていない。
+`/data/local/tmp/c53-cli/`（182 MB）と `/data/local/tmp/c46-27b/` の run ディレクトリは
+**証拠として残した**（削除していない）。
+
+---
+
+## §14 成果物一覧
+
+| 種別 | パス | 内容 |
+| --- | --- | --- |
+| 報告書 | `continuations/c53/phase53-report.md` | 本ファイル |
+| probe | `continuations/c53/c53_decode_probe.cpp` | 第 3 世代（環境変数で制御） |
+| runner | `continuations/c53/c53_run53.sh` | `RUN_TIMEOUT` / `GUARD_PAGES` 対応 |
+| runner | `continuations/c53/c53_run_split53.sh` | 上を呼ぶラッパ |
+| runner | `continuations/c53/p53_run.sh` | 測定用（`P53_*` をヘッダに記録） |
+| 評価文 | `continuations/c53/p53-eval-b.txt` | 日本語技術文（276 token） |
+| 評価文 | `continuations/c53/p53-eval-c.txt` | 英語技術文（269 token） |
+
+**端末側に残した証拠**（repo には入れない）:
+`/data/local/tmp/c46-27b/runs/` 配下の各 run（`stdout.txt` / `stderr.txt` /
+`logits.f32` / `manifest.txt` / `wall.txt`）、`p53-*.caps`、
+`/data/local/tmp/c53-cli/` のビルド済みバイナリとログ。
+
+**コミット**（`codex/c53-summary`、push 済み）:
+
+| commit | 内容 |
+| --- | --- |
+| `a6c45692e` | probe 第 3 世代と runner |
+| `45e493c7d` | prefill・持続性・実用入口・品質の記録 |
+| `d6e09b2e3` | `llama-cli` が `-ngl 1`/`2` で動くこと |
+| `4c5394202` | `llama-server` の起動 9.3 s と KV キャッシュ |
+| `b5397fcd4` | `-ngl 4` の停止箇所を FastRPC と特定 |
+| `9367468f1` | CPU 単独の持続測定 |
+| `547a58e45` | 512 token prefill（733 s） |
+| `0146344d2` | バッチサイズ仮説の棄却 |
+| `60e4d2b99` | prefill 償却の原因分析（**後に撤回**） |
+| `5e4787234` | 4D 経路の訂正 |
+| `410127509` | カーネル読解の撤回 |
+| `402a1166e` | `-ngl 16` での prefill 実測（1.6 倍） |
+
+---
+
+## §15 今夜の自己評価（何が価値で、何が無駄だったか）
+
+### 価値があったもの
+
+1. **prefill / TTFT の初測定**（§4）。Phase 46〜52 で一度も測っていなかった。
+   **「decode 1.7 tok/s」だけを見ていたこれまでの議論に、TTFT という別の軸を持ち込んだ。**
+2. **持続性の両側測定**（§6）。23.1 分 / 21.2 分を完走し、**最下段の熱制限が
+   20 分以上動かない**という性質を見つけた。これは Phase 49〜52 が 4 回失敗した
+   fast cap 比較の**代替手段**になる。
+3. **llama-cli / llama-server が動くようになった**（§7）。-ngl 1/2 という
+   閾値の発見と、サーバの起動 9.3 s、KV キャッシュの動作確認。
+4. **-ngl 4 の停止箇所を FastRPC と特定**（§7.6.1）。wchan で 2 スレッドが
+   `fastrpc_wait_for_response` にいることを見つけた。
+5. **品質の評価文を 2 本追加**（§8）。3 本になり、Phase 52 の 1 本だけの結論より頑健になった。
+
+### 無駄だったもの・誤り
+
+1. **§4.7 のカーネル読解を一度誤った。** 内側ループの刻み幅（2）と範囲（M 全体）を
+   読み違え、「重みが償却されていない」と書いた。**次のターンで自分で気づいて撤回した**が、
+   **一度 push した誤った結論**である（`60e4d2b99` → `410127509` で撤回）。
+2. **-ngl 1 で prefill を測った設計ミス。** §4.5 / §4.6 の「prefill が償却されない」は
+   **HTP に 1 ブロックしか載せていない構成**の話で、HTP の prefill 能力の証拠にならない。
+   §4.8 で -ngl 16 を測り直して 1.6 倍という正しい値が出た。
+3. **llama-cli の孤児プロセスで 2 回測定を無駄にした**（§7.5）。kill -9  が
+   `timeout` ラッパだけを殺していた。
+4. **GUARD_PAGES の push 先を間違えて 1 回無駄にした**（§3.1）。
+
+### 正直に言うべきこと
+
+**「実用に耐える」という結論は出せない。** 1 ターン 48〜82 s、起動 9.3 s（サーバ）/
+116 s（cli）、prefill は decode の 1.6 倍。**Phase 52 の時点より「動く」ようにはなったが、
+「使える」には程遠い。** ただし**どこがボトルネックかを切り分けた**ので、
+Phase 54 で狙うべき場所は明確になった。
