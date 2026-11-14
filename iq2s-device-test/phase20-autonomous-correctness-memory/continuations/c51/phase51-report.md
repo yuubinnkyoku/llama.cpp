@@ -712,6 +712,196 @@ n=1/4/8/16/34、off/async のすべてで **0x2e を出さない**。
 - 参考: 15:10 の 2 組では off 656.295 / async 579.918 (-11.6 %) と
   async 656.752 / off 615.554 (+6.7 %) で、これも方向が一致しない。
 
+## 18. 2026-11-14 夕: 0x2e の原因特定と修正、fast cap 窓の測定
+
+### 18.1 前回の結論は誤りだった (buffer 本数ではない)
+
+§17 は「0x2e は 1 opbatch に複数 buffer を入れる構成で出る」と結論したが、
+これは**測定に使ったバイナリが古かった**ためである。
+
+端末の `c51_split_repro` は 2026-11-13 00:14 のビルドで、
+`GGML_HEXAGON_DMA64` を尊重する変更より前のものだった。そのため
+`GGML_HEXAGON_DMA64=1` を渡しても実際は DMA64=0 で走っていた。
+
+```
+$ GGML_HEXAGON_DMA64=1 ./c51_split_repro --mode off --n 1 --repeats 1
+ggml-hex: Hexagon Arch version v81, DMA64 disabled      <- 渡したのに無効
+```
+
+再ビルド後は同じコマンドで `DMA64 enabled` になり、weight buffer が
+`extended 1` で map される。**その状態でも 0x2e は出ない。**
+§17 の「1 buffer なら出ない」は DMA64=0 の測定であり、比較になっていなかった。
+
+### 18.2 真のトリガー: 出力が extended mapping の中にあること
+
+`c46_split_repeat` と `c51_split_repro` の構造差を 1 つずつ潰した。
+残った差は「MUL_MAT の**出力**が WEIGHTS buffer の中にあるか」だけである。
+
+- `c46_split_repeat`: `w2` `x2` `y2` を同じ context から確保するので、
+  `y2` も WEIGHTS buffer に入り、DMA64=1 では extended mapping になる。
+- `c51_split_repro`: 出力は activation buffer にあり、extended にならない。
+
+これを直接試す `c51_dma64_repro` を書いた。op と形状は同一で、
+出力の置き場所だけを変える。
+
+| DMA64 | 出力の場所 | rc | 0x2e | logits hash |
+| ---: | --- | ---: | ---: | --- |
+| 0 | 別 buffer | 0 | なし | `041f7d7d77f25d83` |
+| 0 | weights buffer | 0 | なし | `041f7d7d77f25d83` |
+| 1 | 別 buffer | 0 | なし | `041f7d7d77f25d83` |
+| 1 | weights buffer | **134** | **あり** | — |
+
+3 回ずつ実行し、4 行とも毎回同じ結果だった。**トリガーは
+「DMA64=1 かつ op の出力が extended mapping 内」で確定。**
+
+### 18.3 原因
+
+skel の `htp_mmap` は extended mapping を **読み取り専用**で作る。
+
+```c
+payload.mmap.prot  = HAP_MEM_CACHE_NON_SHARED | HAP_PROT_READ;
+payload.mmap.flags = HAP_MEM_FLAGS_EXTENDED_MAP;
+```
+
+書き込み先がこの mapping だと DSP 側でフォールトし、応答が返らないまま
+ホストの `dspqueue_read` が 0x2e になる。
+
+`matmul-ops.c` には同じ理由のガードが**一部の入口にしか無かった**。
+
+| 入口 | extended 出力のガード |
+| --- | --- |
+| `op_matmul_id` | あり (`dst` と `src1` と `ids`) |
+| `op_matmul_id_nx` | あり (`dsts[p]` と `act` と `ids`) |
+| `op_matmul` | **無し** |
+| `op_matmul_nx` | **無し** |
+
+`c46_split_repeat` の MUL_MAT は `op_matmul` を通るので、ガードを素通りして
+フォールトしていた。`op_matmul_id` 系を使う実モデルの MoE 経路が無事だったのは
+このためである。
+
+### 18.4 修正
+
+`op_matmul` と `op_matmul_nx` に、`op_matmul_id` と同じ判定を足した (13 行)。
+
+```c
+    // An extended (DMA64) mapping is read only, so a kernel that writes into one
+    // faults instead of returning an error. op_matmul_id and op_matmul_id_nx
+    // already refuse that case; without the same check here the plain MUL_MAT
+    // paths take the fault and the host sees dspqueue_read 0x2e.
+    if (htp_tensor_is_extended(octx->src[1]) || htp_tensor_is_extended(octx->dst)) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
+```
+
+`op_matmul_nx` は活性の位置が `src[n_weights]` なので、そちらを参照する。
+
+### 18.5 修正の検証
+
+skel を再ビルドして端末に置いた。
+
+| 項目 | 値 |
+| --- | --- |
+| 修正前 skel (Phase 50 D) | `288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d` |
+| 修正後 skel | `70b9ed4fafb2ab298baf9f9bbed3c38a4a457cc4838775a690b9168dfb7eca1f` |
+
+`c51_dma64_repro --out wbuf`、DMA64=1、3 回:
+
+| 項目 | 修正前 | 修正後 |
+| --- | --- | --- |
+| rc | 134 | 134 |
+| `dspqueue_read 0x2e` | 1 | **0** |
+| ホストのメッセージ | `dspqueue_read failed: 0x0000002e` | `dspcall : dsp-rsp NO-SUPPORT` |
+
+**0x2e は消え、理由の分かるエラーになった。** 落ちるのは
+「extended mapping を出力に使う」という構成自体が不正だからで、
+不正が静かなフォールトではなく明示的な拒否として返るようになった。
+
+`--out abuf` は修正前後とも rc 0、hash `041f7d7d77f25d83` で不変。
+
+### 18.6 27B 本線の回帰 (修正 skel)
+
+修正 skel で 27B を 4 step、NGL=9、33 本分割で回した。
+
+| mode | exit | min_ms | logits sha256 (先頭 16) | split 本数 |
+| --- | ---: | ---: | --- | ---: |
+| off | 0 | 458.539 | `5585d4edc47ee750` | 0 |
+| async | 0 | 532.010 | `2d4693c43c0cc307` | 33 |
+
+- off の hash は Phase 50 の ngl=9 分割なし基準 `5585d4edc47ee750` と一致。
+- async の hash は §17 の async と一致 (`2d4693c4...`)。
+- **修正 skel は 27B の分割経路を変えていない。** 分割は
+  `op_matmul` を通るが、出力は activation buffer にあり extended ではないため
+  新しいガードに掛からない。
+- この run は cap `3187200_3648000` (capped)。性能比較には使わない。
+
+### 18.7 fast cap 窓での ABBA (不成立)
+
+16:22-16:28 に fast cap (`3628800/3648000`、tz0 30.7 ℃) の窓が開いたので
+1 組取った。**両 run とも cap が 1 sample だけ動いたため、§15/§17 と同一基準で
+不成立**として除外する。数値は参考として残す。
+
+| run | exit | min_ms | cap の内訳 | logits |
+| --- | ---: | ---: | --- | --- |
+| off | 0 | 461.042 | `3628800_3648000` x10、`3398400_3648000` x1 | `5585d4ed...` |
+| async | 0 | 527.604 | `3628800_3648000` x10、`3187200_*` x2 | `2d4693c4...` |
+
+- 両方とも step 0 のロードを含む 4 step。off 461 ms は今回観測した最小。
+- 方向は async が 14 % **遅い**。ただし不成立 run なので判定には使わない。
+- 窓は 16:28 に閉じた (cap 3187200、tz0 49.2 ℃)。以後 16:32 まで再開せず。
+
+### 18.8 判定
+
+| 目標 | 判定 | 根拠 |
+| --- | --- | --- |
+| 目標1 pair 確保 | **BLOCKED** | fast cap 窓は 16:22-16:28 に取れたが、2 run 連続で cap が 1 sample 動き、同一 cap の pair が 0 組。窓は 6 分で閉じた |
+| 目標1 並列高速化 | **PARTIAL** | 有効 pair 0 組。§17 までの全測定でも 5 % 優位は未確認。SPLIT=0 既定を維持 |
+| 目標1 CPU 単独比 | **未測定** | pair が揃わず、窓も閉じたため実施せず |
+| 目標2 トリガー特定 | **PASS** | 「DMA64=1 かつ出力が extended mapping 内」で確定。4 条件 × 3 回が全て一致 |
+| 目標2 最小修正 | **PASS** | 13 行のガードで 0x2e → `NO-SUPPORT`。27B 回帰も off/async とも hash 不変 |
+
+### 18.9 コミット
+
+| commit | 内容 |
+| --- | --- |
+| `ddcf2a54a` | `fix(hexagon): refuse an extended mapping as a MUL_MAT output` |
+| `7bdcc82f8` | `test(c51): add the DMA64 output-location reproduction` |
+
+### 18.10 再現コマンド
+
+```sh
+# トリガーの確認 (DMA64=1、出力の場所だけを変える)
+cd /data/local/tmp/c46-27b
+for o in abuf wbuf; do
+  env LD_LIBRARY_PATH=libs ADSP_LIBRARY_PATH=libs \
+    GGML_HEXAGON_DEVICES=HTP0:0 GGML_HEXAGON_OPPOLL=0 GGML_HEXAGON_DMA64=1 \
+    ./c51_dma64_repro --out $o --m 17408 --k 5120 --repeats 1
+done
+# abuf -> rc 0 / hash 041f7d7d77f25d83、wbuf -> 修正前 0x2e、修正後 NO-SUPPORT
+
+# 27B 回帰 (修正 skel)
+export SPLIT_WEIGHTS=$(cat libs/split33.txt)
+export WANT_SKEL=70b9ed4fafb2ab298baf9f9bbed3c38a4a457cc4838775a690b9168dfb7eca1f
+sh p51_series.sh 9 4 replay off:0 async:0.25
+```
+
+skel のビルド:
+
+```powershell
+$env:HEXAGON_SDK_ROOT="C:\Qualcomm\Hexagon_SDK\6.6.0.0"
+$env:HEXAGON_TOOLS_ROOT="C:\Qualcomm\Hexagon_SDK\6.6.0.0\tools\HEXAGON_Tools\19.0.07"
+cmake --build build-c51 --target htp-v81
+```
+
+### 18.11 次の一手
+
+1. **fast cap の窓は 6 分しか保たない。** 1 組 (2 run) に約 2 分かかるので、
+   窓に入ったら 2 組を続けて取るには冷却を強める必要がある。
+   画面消灯とアイドル待ちだけでは足りない。
+2. 0x2e は**修正済み**。DMA64=1 を使う経路の安全性は上がったが、
+   分割既定は DMA64=0 のままにする (Phase 49 以降の既知正常条件)。
+3. 分割並列化の 5 % は依然未確認。有効 pair が 0 組なので、
+   性能判定は「現構成では不採用」を維持する。
+
 ## 付録 A. 変更前後のコード
 
 3 つの修正はすべて `ggml/src/ggml-hexagon/ggml-hexagon.cpp` の中にある。
