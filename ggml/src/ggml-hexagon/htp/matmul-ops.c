@@ -4393,6 +4393,14 @@ int op_matmul(struct htp_ops_context * octx) {
         return status;
     }
 
+    // An extended (DMA64) mapping is read only, so a kernel that writes into one
+    // faults instead of returning an error. op_matmul_id and op_matmul_id_nx
+    // already refuse that case; without the same check here the plain MUL_MAT
+    // paths take the fault and the host sees dspqueue_read 0x2e.
+    if (htp_tensor_is_extended(octx->src[1]) || htp_tensor_is_extended(octx->dst)) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
+
     if (kparams->n_hmx) {
         return hmx_mm_op_matmul(octx, kparams);
     }
@@ -4994,6 +5002,11 @@ int op_matmul_nx(struct htp_ops_context * octx) {
     const int status = htp_mm_init_context(octx, kparams);
     if (status != HTP_STATUS_OK) {
         return status;
+    }
+
+    // Same read-only rule as op_matmul: an extended mapping cannot be a target.
+    if (htp_tensor_is_extended(octx->src[kparams->n_weights]) || htp_tensor_is_extended(octx->dst)) {
+        return HTP_STATUS_NO_SUPPORT;
     }
 
     if (kparams->n_hmx) {
