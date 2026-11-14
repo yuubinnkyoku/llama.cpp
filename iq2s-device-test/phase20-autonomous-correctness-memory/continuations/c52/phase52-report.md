@@ -300,3 +300,293 @@ done
 3. 品質評価は n=32・評価文 1 本・生テキストで完了した。より強い裏付けが
    必要なら、評価文を増やすか chat template を適用した条件で測る。
    ただしそれは本 Phase の範囲外。
+
+## 9. probe の step 上限の特定と修正
+
+### 9.1 原因
+
+`decode-probe-wait` のソースは
+`iq2s-device-test/phase20-autonomous-correctness-memory/tools/c27_decode_probe_wait.cpp`
+にあり、step 数を**引数の検証で 32 に制限**していた。
+
+```c
+    const int steps = std::atoi(argv[3]);
+    if (steps < 1 || steps > 32) {
+        return 2;
+    }
+```
+
+`return 2` が**何も出力しない**ため、§3.1 で観測した「stdout も stderr も空で
+2.5 秒で exit 2」という症状になっていた。バッファサイズや静的配列ではなく、
+単純な引数上限である。
+
+`n_ctx` は 128、prompt は数トークンなので、64 step は元から収まる。
+他に step 数依存の制約は無い (decode ループは `steps` をそのまま使う)。
+
+### 9.2 変更内容 (最小)
+
+上限だけを 32 → 64 に変えた。**1 行の定数変更のみ**で、decode の計算経路には
+触れていない。
+
+```diff
+     const int steps = std::atoi(argv[3]);
+-    if (steps < 1 || steps > 32) {
++    // Phase 52: was 32. n_ctx is 128 below and the prompt is a few tokens, so
++    // 64 steps fit. Raising the limit does not touch the decode loop, which the
++    // 32-step regression against the known hashes checks before 64 is used.
++    if (steps < 1 || steps > 64) {
+         return 2;
+     }
+```
+
+ソースは `continuations/c52/decode_probe_64.cpp` として保存した
+(元ファイルはメイン worktree にあり、そちらは変更していない)。
+
+### 9.3 ビルド
+
+端末のライブラリと ABI を合わせるため、**端末から取り出した .so にリンク**した。
+
+```powershell
+# 端末から 4 本の .so を取り出す (libggml.so と libggml-cpu.so は symlink の先)
+adb pull /data/local/tmp/c46-27b/libs/libllama.so      build/p52/devlibs/
+adb pull /data/local/tmp/c46-27b/libs/libggml-base.so  build/p52/devlibs/
+adb pull /data/local/tmp/c44-27b/libs/libggml.so       build/p52/devlibs/
+adb pull /data/local/tmp/c44-27b/libs/libggml-cpu.so   build/p52/devlibs/
+
+$NDK="C:/Users/yuubi/AppData/Local/Android/Sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x86_64/bin"
+& "$NDK/clang++.exe" --target=aarch64-linux-android28 -O2 -std=c++17 `
+  -static-libstdc++ -fPIC -I <repo>/include -I <repo>/ggml/include `
+  decode_probe_64.cpp -o decode-probe-wait `
+  -L build/p52/devlibs -lllama -lggml -lggml-base -lggml-cpu `
+  -Wl,--allow-shlib-undefined
+```
+
+`--allow-shlib-undefined` は、端末の `libggml-cpu.so` が
+`_Unwind_Resume@LIBC_R` を未解決のまま持っているため必要だった。
+生成物の依存 .so 一覧は元の probe と同一 (`libc`, `libdl`, `libm`,
+`libggml-base`, `libggml-cpu`, `libggml`, `libllama`)。
+
+| 項目 | sha256 |
+| --- | --- |
+| 元の probe (バックアップ) | `aeaa1b6236d597cc04ad0b642074f451abb70d409b66625a2dd3083c9bd13f3f` |
+| 再ビルドした probe | `ad15340c5c0447d949c867a4327c86118c8d162490e73179c385401e9145725d` |
+
+### 9.4 32-step 回帰 (既知 hash との一致)
+
+**probe 差し替えが計算結果に影響しないことの証明。** 再ビルド後、§1.5 と
+同じ条件で 32-step を回した。
+
+| 側 | 既知 hash (§1.5) | 再ビルド後 | 一致 |
+| --- | --- | --- | --- |
+| CPU (NGL=0) | `44cd99ce376d5ce627ebbd4dc1c1d6cb90e83ea7822371f13a4874f921262295` | `44cd99ce...` | **一致** |
+| HTP (NGL=16) | `b21ca4bf1da8a2ef3bc48f717ee79f13acc17ced0783141211fc7178f0c2e160` | `b21ca4bf...` | **一致** |
+
+**両側とも完全一致。** 上限変更は数値に影響していない。
+
+### 9.5 ガード発動 (記録)
+
+32-step 回帰の途中で 4 回、64-step の途中で 5 回、swap guard が発動した。
+すべて**モデルのロード/prefill 中**で、ガードは 1024 MiB のまま緩めていない。
+
+| 時刻 | run | delta_pages | 備考 |
+| --- | --- | ---: | --- |
+| 20:09 | 32-step CPU | 337,357 | 再試行で成功 |
+| 20:15 | 32-step CPU | — | 再試行で成功 |
+| 20:16 | 32-step CPU | 464,482 | 再試行で成功 |
+| 20:21 | 32-step CPU | — | 再試行で成功 |
+| 20:30 | 64-step CPU 再現 | 271,416 | 再試行で成功 |
+| 20:38 | 64-step CPU 再現 | — | 再試行で成功 |
+| 20:42 | 64-step HTP 再現 | 348,391 | **未成功** |
+| 20:47 | 64-step HTP 再現 | 527,476 | **未成功** |
+| 20:48 | 64-step HTP 再現 | 481,808 | **未成功** |
+| 20:55 | 64-step HTP 再現 | 471,186 | **未成功** |
+
+**失敗した 4 回はいずれも HTP 64-step の再現 run。** 成功した run の
+AnonPages は約 1.4 GB、失敗した run は 2.0-2.4 GB だった。背景アプリ
+(`ai.mistral.chat`、`com.google.android.gms`、キーボードの `zenz` など) が
+force-stop 後も数秒で復帰し、AnonPages を押し上げるためである。
+
+## 10. 目標 1 の 64-step 結果
+
+### 10.1 完走した run
+
+| 側 | run | exit | logits sha256 |
+| --- | --- | ---: | --- |
+| CPU (NGL=0) | 1 回目 | 0 | `de62b90c81521463075bbb0f7fe02d1b9d3fc9262799cd984e39a1e0d6021db4` |
+| CPU (NGL=0) | 2 回目 | 0 | `de62b90c81521463075bbb0f7fe02d1b9d3fc9262799cd984e39a1e0d6021db4` |
+| HTP (NGL=16) | 1 回目 | 0 | `d7b272a076bfb79aff543db9cf3042d5663a82a740dd7915228e4a073b53c627` |
+| HTP (NGL=16) | 2 回目 | **6 (guard)** | 未取得 |
+
+**CPU 側は 2 回とも完全一致。HTP 側は 1 回のみで、再現確認が取れていない。**
+
+### 10.2 NLL 統計 (64 step)
+
+| 量 | 値 |
+| --- | ---: |
+| 平均 NLL CPU (NGL=0) | 2.977521 |
+| 平均 NLL HTP (NGL=16) | 2.964708 |
+| **平均差 (HTP − CPU)** | **−0.012813 nats** |
+| 標準誤差 | 0.016859 |
+| t (dof=63) | **−0.76** |
+| PPL CPU | 19.6391 |
+| PPL HTP | 19.3890 |
+| **argmax 一致** | **61/64** |
+| greedy == forced (CPU) | 24/64 |
+| greedy == forced (HTP) | 25/64 |
+
+**NLL の差は −0.0128 ± 0.0169 nats (t = −0.76) で、ゼロと区別できない。**
+ただし **argmax は 3 step で不一致**だった (32-step では 32/32 一致)。
+
+### 10.3 argmax が不一致だった step
+
+| step | 正解 | NLL CPU | NLL HTP | 差 | argmax CPU | argmax HTP |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 38 | 2614 | 3.925153 | 3.872234 | −0.052919 | 1510 | **351** |
+| 48 | 321 | 1.187739 | 1.012883 | −0.174856 | 11 | **321** |
+| 58 | 68 | 2.797592 | 2.845907 | +0.048315 | 2186 | **34** |
+
+- step 48 では HTP 側の argmax が**正解トークンと一致**しており、
+  CPU 側が外している。差の方向は一様でない。
+- 3 step とも NLL 差は小さい (−0.17 から +0.05)。argmax が入れ替わるのは
+  上位 2 候補の logit が近い step である。
+
+### 10.4 logits の距離 (64 step)
+
+| 量 | 最小 | 中央値 | 最大 |
+| --- | ---: | ---: | ---: |
+| 相対 L2 差 | 1.677 % | 7.305 % | **49.517 %** |
+| 最大絶対差 | 0.3171 | 1.6619 | **6.5177** |
+| 全変動距離 (TV) | 0.004 % | 3.269 % | 11.597 % |
+| KL (CPU‖HTP) | 6.773e-06 | 4.863e-03 | 4.407e-02 |
+
+**最大 49.5 % (相対 L2) は step 34 の 1 点**で、その step の TV は 0.608 %、
+KL は 6.75e-03 と小さい。logit 全体が平行移動した形で、分布の形は
+ほとんど変わっていない。中央値 (7.3 %) は 32-step の 6.4 % と同程度。
+
+### 10.5 32-step と 64-step の比較
+
+| 量 | 32-step | 64-step |
+| --- | ---: | ---: |
+| 平均 NLL 差 | −0.006229 | −0.012813 |
+| 標準誤差 | 0.013226 | 0.016859 |
+| t | −0.47 | −0.76 |
+| argmax 一致 | **32/32** | **61/64** |
+| 相対 L2 中央値 | 6.400 % | 7.305 % |
+| 相対 L2 最大 | 11.768 % | 49.517 % |
+| 最大絶対差 最大 | 2.8008 | 6.5177 |
+
+- NLL 差はどちらもゼロと区別できない。
+- **argmax は 32-step では完全一致だったが、64-step では 3 件不一致。**
+  step を延ばすと不一致が出る可能性があることを示す実測である。
+- 相対 L2 の最大は 64-step で大きいが、これは 1 step の外れ値
+  (step 34) による。中央値は同程度。
+
+## 11. 目標 2: fast cap CPU 単独比のクローズ
+
+**再挑戦せず BLOCKED (環境制約で測定不能) として確定する。**
+
+### 11.1 実測の対比
+
+同じ端末・同じ fast cap 条件で、2 つの構成の cap 保持に差があった。
+
+| 構成 | 時刻 | fast cap の保持 | 出典 |
+| --- | --- | --- | --- |
+| CPU 単独 (NGL=0) 4-step | 19:25 | **1 run 目で cap0 が 1 sample 降下** (`3513600`) | §4.2 |
+| HTP off (SPLIT=0) 4-step | 18:47 | **12/12 sample すべて保持** | §19.11 |
+
+- CPU 単独は 27B の全層を CPU で回すため発熱が大きく、fast cap の窓
+  (1-6 分) の中で 1 run すら cap を保てなかった。
+- HTP off は同じ 4-step でも fast cap を 12 sample 保持した。
+- **これは観測された対比であり、「HTP が持続性能で優位」といった結論では
+  ない。** 測定条件 (時刻・熱履歴・背景負荷) が異なる 2 点の比較で、
+  同一条件の対比較ではない。
+
+### 11.2 判定
+
+**BLOCKED。** 同一 cap の CPU 単独 vs HTP の pair は 0 組。
+fast cap の窓が 1-6 分で閉じ、CPU 単独 1 run がその窓を保てないため、
+この端末では測定不能という環境制約として確定する。
+温度保護・電源ポリシーへの介入は行っていない。
+
+## 12. Phase 52 最終判定
+
+| 目標 | 判定 | 根拠 |
+| --- | --- | --- |
+| 目標 1: 32-step 品質 | **PASS** | 両側完走、NLL 差 −0.0062 ± 0.0132 (t=−0.47)、argmax 32/32、各側 2 回 hash 一致 (§2) |
+| 目標 1: probe 修正 | **PASS** | 上限 32 → 64 の 1 行変更。32-step 回帰が両側とも既知 hash と一致 (§9.4) |
+| 目標 1: 64-step 品質 | **PARTIAL** | 両側完走し統計は取得。CPU は 2 回一致だが **HTP の再現確認が取れていない** (4 回試行すべて guard) (§10) |
+| 目標 2: fast cap CPU 単独比 | **BLOCKED** | 同一 cap の pair 0 組。CPU 単独が fast cap を 1 run も保てない (§11) |
+
+**品質が同等であるとは結論しない。** 64-step では argmax が 3/64 で
+不一致だった。差の実測を報告し、合否の判断は所有者に委ねる。
+根拠のない精度閾値は設定していない。
+
+## 13. コミット
+
+| commit | 内容 |
+| --- | --- |
+| (本節) | `docs(c52): raise the probe step limit and record the 64-step quality` |
+
+ブランチ `codex/c52-quality`。基準は `151751a3a`。
+
+## 14. 再現コマンド
+
+### 14.1 probe のビルドと差し替え
+
+§9.3 のとおり。差し替え前のバックアップ:
+
+```sh
+adb shell 'cp /data/local/tmp/c45-27b/libs/decode-probe-wait \
+  /data/local/tmp/c45-27b/libs/decode-probe-wait.p19bak'
+```
+
+### 14.2 32-step 回帰
+
+```sh
+cd /data/local/tmp/c46-27b
+cp libs/replay32.txt libs/replay.txt
+export WANT_SKEL=288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d
+PROFILE_ARG=0 sh p50_run.sh 32 replay 0  reg32cpu 1   # -> 44cd99ce...
+PROFILE_ARG=0 sh p50_run.sh 32 replay 16 reg32htp 1   # -> b21ca4bf...
+```
+
+### 14.3 64-step
+
+```sh
+cd /data/local/tmp/c46-27b
+cp libs/replay64.txt libs/replay.txt
+export WANT_SKEL=288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d
+PROFILE_ARG=0 sh p50_run.sh 64 replay 0  nll64cpu 1   # -> de62b90c...
+PROFILE_ARG=0 sh p50_run.sh 64 replay 16 nll64htp 1   # -> d7b272a0...
+```
+
+```powershell
+# 統計
+python .../c50/p50_nll.py build/p52/lg-cpu64.f32 build/p52/lg-htp64.f32 `
+  "<64 tokens>" 64 248320
+python .../c52/p52_logits_dist.py build/p52/lg-cpu64.f32 build/p52/lg-htp64.f32 64 248320
+```
+
+### 14.4 後片付け
+
+```sh
+adb shell 'cp /data/local/tmp/c45-27b/libs/decode-probe-wait.p19bak \
+  /data/local/tmp/c45-27b/libs/decode-probe-wait'
+adb shell 'chmod 755 /data/local/tmp/c45-27b/libs/decode-probe-wait'
+adb shell 'cp /data/local/tmp/c46-27b/libs/replay.txt.p52bak \
+  /data/local/tmp/c46-27b/libs/replay.txt'
+```
+
+## 15. 次の一手
+
+1. **HTP 64-step の再現確認が残っている。** 4 回試行して 4 回とも
+   swap guard で停止した。成功した run の AnonPages は約 1.4 GB、
+   失敗した run は 2.0-2.4 GB で、背景アプリの復帰が原因。
+   端末が静穏な時間帯 (深夜など) に 1 run 取れば埋まる。
+2. **64-step で argmax が 3/64 不一致だった事実は記録として重要。**
+   32-step では 32/32 一致だったので、step を延ばすと差が出る。
+   品質判断の材料として所有者に提示する。
+3. probe の上限変更は 1 行で、32-step 回帰が両側とも既知 hash と一致した。
+   この probe は実験ツールであり、skel や端末設定には触れていない。
+   終了時は元の probe に戻した。
+
