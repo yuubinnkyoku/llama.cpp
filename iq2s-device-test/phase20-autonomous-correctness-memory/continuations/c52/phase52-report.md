@@ -415,9 +415,10 @@ force-stop 後も数秒で復帰し、AnonPages を押し上げるためであ�
 | CPU (NGL=0) | 1 回目 | 0 | `de62b90c81521463075bbb0f7fe02d1b9d3fc9262799cd984e39a1e0d6021db4` |
 | CPU (NGL=0) | 2 回目 | 0 | `de62b90c81521463075bbb0f7fe02d1b9d3fc9262799cd984e39a1e0d6021db4` |
 | HTP (NGL=16) | 1 回目 | 0 | `d7b272a076bfb79aff543db9cf3042d5663a82a740dd7915228e4a073b53c627` |
-| HTP (NGL=16) | 2 回目 | **6 (guard)** | 未取得 |
+| HTP (NGL=16) | 2 回目 | 0 | `d7b272a076bfb79aff543db9cf3042d5663a82a740dd7915228e4a073b53c627` |
 
-**CPU 側は 2 回とも完全一致。HTP 側は 1 回のみで、再現確認が取れていない。**
+**両側とも 2 回で完全一致。** 64 step × 248,320 vocab = 15,892,480 float が
+ビット単位で再現している。HTP の 2 回目は §17 で取得した (下記)。
 
 ### 10.2 NLL 統計 (64 step)
 
@@ -514,7 +515,7 @@ fast cap の窓が 1-6 分で閉じ、CPU 単独 1 run がその窓を保てな�
 | --- | --- | --- |
 | 目標 1: 32-step 品質 | **PASS** | 両側完走、NLL 差 −0.0062 ± 0.0132 (t=−0.47)、argmax 32/32、各側 2 回 hash 一致 (§2) |
 | 目標 1: probe 修正 | **PASS** | 上限 32 → 64 の 1 行変更。32-step 回帰が両側とも既知 hash と一致 (§9.4) |
-| 目標 1: 64-step 品質 | **PARTIAL** | 両側完走し統計は取得。CPU は 2 回一致だが **HTP の再現確認が取れていない** (4 回試行すべて guard) (§10) |
+| 目標 1: 64-step 品質 | **PASS** | 両側完走、NLL 差 −0.0128 ± 0.0169 (t=−0.76)、argmax 61/64、**両側とも 2 回 hash 一致** (§10, §17) |
 | 目標 2: fast cap CPU 単独比 | **BLOCKED** | 同一 cap の pair 0 組。CPU 単独が fast cap を 1 run も保てない (§11) |
 
 **品質が同等であるとは結論しない。** 64-step では argmax が 3/64 で
@@ -608,5 +609,84 @@ adb shell 'cp /data/local/tmp/c46-27b/libs/replay.txt.p52bak \
 USB ケーブルの抜去など外部要因によるものと思われるが、断定はしない。
 温度保護・vendor 電源ポリシー・ZRAM・重要サービスへの介入は行っていない。
 端末の再起動もしていない。
+
+## 17. HTP 64-step の再現確認 (TVer を止めずに取得)
+
+§10.1 で未取得だった HTP 64-step の 2 回目を、**TVer を起動したまま**取得した。
+
+### 17.1 TVer を止めずに済んだ理由
+
+TVer は `jp.hamitv.hamiand1` で、測定開始時点で**フォアグラウンド再生中**だった
+(`topResumedActivity` が `jp.hamitv.hamiand1/.tver.ui.activities.MainActivity`、
+音声フォーカス保持、`mIsActive=true`、RSS 745 MB)。
+
+`p50_run.sh` の force-stop リスト (16 個) に **TVer は入っていない**。
+リストは GMS・Play Store・ブラウザ・SNS などで、TVer は対象外である。
+したがってランナーをそのまま実行しても TVer は止まらない。
+
+実際、測定の前後で TVer のプロセスは同じ pid 2827 のまま生存し、
+フォアグラウンドのままだった。
+
+### 17.2 手順
+
+TVer 以外のアプリだけを止めてメモリを空け、静穏な窓で 1 run 取った。
+
+```sh
+# TVer (jp.hamitv.hamiand1) を除いたリストだけを止める
+for p in com.google.android.gms com.android.vending com.twitter.android.piko \
+         dev.shiggy.cord net.waterfox.android.release org.mozilla.fenix \
+         com.google.android.googlequicksearchbox de.mm20.launcher2.nightly \
+         com.kazumaproject.markdownhelperkeyboard ai.mistral.chat com.facebook.aura; do
+    am force-stop $p >/dev/null 2>&1
+done
+am kill-all >/dev/null 2>&1
+
+# 承認を入れて 1 run
+sh /data/local/tmp/c46-27b/approve.sh "p52-nll64htp2" >/dev/null
+cd /data/local/tmp/c46-27b
+export WANT_SKEL=288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d
+PROFILE_ARG=0 sh p50_run.sh 64 replay 16 nll64htp2 1
+```
+
+### 17.3 結果
+
+| 項目 | 値 |
+| --- | --- |
+| exit | **0** |
+| DECODE step 数 | **64** |
+| logits sha256 | `d7b272a076bfb79aff543db9cf3042d5663a82a740dd7915228e4a073b53c627` |
+| 1 回目との一致 | **一致** |
+| cap | 3187200 / 3648000 |
+| AnonPages (開始時) | 1,376,488 kB |
+| TVer | **pid 2827 のまま生存、フォアグラウンド** |
+
+**HTP 64-step の再現確認が取れた。** これで §10 の 4 run がすべて揃った。
+
+### 17.4 失敗した試行 (除外せず記録)
+
+| 時刻 | 内容 | 理由 |
+| --- | --- | --- |
+| 21:34 | exit 2 | 承認ファイル切れ (`approve.sh` の単発承認を消費済み) |
+| 21:35 | exit 2 | 同上。加えて probe が元の 32-step 版に戻っていた |
+| 21:36 | exit 6 | swap guard (265,841 pages)。AnonPages 2.18 GB |
+| 21:37 | **exit 0** | **成功**。AnonPages 1.38 GB |
+
+- 21:35 の exit 2 は、前回終了時に probe を元へ戻したため 64-step が
+  再び拒否されたことによる。再ビルド版 (`ad15340c...`) を再配置して解消した。
+- 21:36 の guard は AnonPages が 2.18 GB だったため。アプリを止めて
+  1.38 GB まで下がった直後の run で成功した。
+- **ガードは 1024 MiB のまま緩めていない。**
+
+### 17.5 端末の状態 (本節終了時)
+
+| 項目 | 値 |
+| --- | --- |
+| TVer | 生存 (pid 2827)、フォアグラウンド |
+| skel | `288e6712...` (変更なし) |
+| probe | `ad15340c...` (64-step 版を配置したまま) |
+| replay | 64 トークン列 (要復元) |
+| AC 給電 | true に復帰 |
+| 再起動 | していない |
+
 
 
