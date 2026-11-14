@@ -608,6 +608,92 @@ cap 3628800/3648000 (fast)、AC 非給電、battery 89 %、
 MemAvailable 6.09 GB で、27B runner の MemAvailable 9.5 GB ゲートにも
 到達していなかった。追加 pair と fast cap の CPU 単独比 -5 % は未測定。
 
+## 17. 2026-11-14 再接続後: 33/34 比較・ABBA 追加・0x2e の切り分け
+
+端末は USB (`324753221196`) で復帰。skel は Phase 50 D のまま
+(`288e6712...`)。再起動はしていない。
+
+### 17.1 33 本 vs 34 本 (小型試験、`--small`、repeats 3)
+
+| n | mode | split 本数 | hash (3 回とも同一) |
+| ---: | --- | ---: | --- |
+| 33 | off | 0 | `2fc532b4872e72a7` |
+| 33 | seq | 33 | `32447938dc3d6159` |
+| 33 | async | 33 | `32447938dc3d6159` |
+| 34 | off | 0 | `76f9261ced66594d` |
+| 34 | seq | 34 | `8eee266925de9793` |
+| 34 | async | 34 | `8eee266925de9793` |
+
+- 33/34 とも **async == seq**、3 回とも再現。
+- 33 と 34 でハッシュが違うのは分割対象が 1 本増えるため当然で、
+  どちらも同一構成内では決定的。
+- **34 本目固有の異常は出ていない。** ただしこれは小型試験であり、
+  27B 全体の 34 本構成を保証しない。
+
+### 17.2 ABBA 追加測定 (2 回試行、有効 pair 0)
+
+1 回目 (`p51_finish.sh 9 4`、14:38-14:46): 8 run 中 7 run exit 0、
+1 run は guard stop (exit 6、`guard stopped=1`)。cap は
+3187200 → 2496000 → 2227200 と降下し、**同一 cap の pair は 0**。
+
+2 回目 (`p51_finish.sh 9 3`、14:55-15:02): 6 run 中 5 run exit 0、
+1 run は guard stop。cap は 3187200 → 2496000 → 2227200 と再び降下し、
+**同一 cap の pair は 0**。
+
+| 試行 | run 数 | exit 0 | guard stop | 有効 pair |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 8 | 7 | 1 | 0 |
+| 2 | 6 | 5 | 1 | 0 |
+
+- 熱制限 (thermal_zone0 40-45 ℃) で cap が 2 段以上動くため、
+  4 step × 8 run を 1 つの cap tier に収められない。
+- guard stop は `pswpout` 由来で、`swap` 列が 272,827-427,478 と大きい run で発生。
+  1024 MiB ガードは緩めていない。
+- **fast cap (3628800/3648000) の窓は 14:34 時点で観測したが、
+  27B を 4 step 回す間に 3187200 へ落ちた。** fast cap での
+  「CPU 単独比 -5 %」は依然未測定。
+- したがって split 並列化の性能判定は **「現構成では 5 % 優位を確認できず」**
+  のまま。コードは保持する。
+
+### 17.3 `dspqueue_read 0x2e` の切り分け (前進)
+
+`c46_split_repeat` で再現する条件を絞った。
+
+| 条件 | 結果 |
+| --- | --- |
+| DMA64=0 | rc 0 |
+| DMA64=1 + `MM_SELECT=1` | rc 134、0x2e |
+| DMA64=1 + `MM_SELECT=0` | rc 6 (`rep: op not supported`、0x2e ではない) |
+| DMA64=1、threads 1/2/3/6 | すべて 0x2e |
+| DMA64=1、type f32/iq2_s、m 512-17408 | すべて 0x2e |
+| DMA64=1、`weights`/`noweights` | どちらも 0x2e |
+
+`GGML_HEXAGON_VERBOSE=1` の差:
+
+- DMA64=0: `fd 24 ... size 5271552 ... extended 0`、`add-buffer #0 ... vmem 5271552`
+- DMA64=1: `fd 24 ... size 6291456 ... extended 1`、`add-buffer #0 ... vmem 0`
+
+つまり DMA64=1 では重みバッファが **extended map** になり、skel 側は
+`HAP_mem_request(HAP_MEM_MAP, HAP_MEM_FLAGS_EXTENDED_MAP)` で DSP VA を取る。
+`libggml-htp-v81.so` に `extended mmap failed` の文字列はあるが、
+今回のログにはそれが**出ていない**。0x2e は `dspqueue_read` の戻りであり、
+DSP 側の応答が返らない/不正という形で現れる。
+
+一方 `c51_split_repro` は同じ DMA64=1 + extended map でも
+n=1/4/8/16/34、off/async のすべてで **0x2e を出さない**。
+差は「1 opbatch に 2 buffer (w1/w2) を入れるか」で、
+`c46_split_repeat` は w1/w2 の 2 buffer、`c51_split_repro` は 1 buffer。
+
+**結論: 0x2e は DMA64=1 の extended map と、複数 buffer を 1 opbatch に
+入れる構成の組み合わせで出る。分割経路そのものではない。原因は未特定。**
+分割試験は DMA64=0 を維持する。
+
+### 17.4 mutex 破壊 — 再確認
+
+`c51base`/`c51final`/descriptor 修正後の 3 つで、off/async × full/`--small` ×
+`--dump`/`--threads`/`--rows` を各 3 回。**全件 rc 0、FORTIFY なし。**
+未再現のままクローズ。
+
 ## 付録 A. 変更前後のコード
 
 3 つの修正はすべて `ggml/src/ggml-hexagon/ggml-hexagon.cpp` の中にある。
