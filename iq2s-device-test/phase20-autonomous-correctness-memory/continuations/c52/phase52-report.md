@@ -590,3 +590,23 @@ adb shell 'cp /data/local/tmp/c46-27b/libs/replay.txt.p52bak \
    この probe は実験ツールであり、skel や端末設定には触れていない。
    終了時は元の probe に戻した。
 
+## 16. 終了時の端末状態
+
+| 項目 | 値 |
+| --- | --- |
+| skel | `288e6712df9c8201ef05c12ec5704968d4f71407992cff8e0f03aa002ee0861d` (Phase 50 D、変更なし) |
+| probe | `aeaa1b6236d597cc04ad0b642074f451abb70d409b66625a2dd3083c9bd13f3f` (元に復元) |
+| replay | `25358 11 198 760` (標準 4 トークン列に復元) |
+| decode-probe プロセス | なし |
+| cap | 2496000 |
+| tz0 | 43.4 ℃ |
+| MemAvailable | 8,571,608 kB |
+| SwapFree | 11,291,024 kB |
+
+**給電について**: 測定中は AC 給電だったが、終了時点で `AC powered: false` /
+`Discharging` (74 %) になっていた。**本作業で給電設定は変更していない。**
+USB ケーブルの抜去など外部要因によるものと思われるが、断定はしない。
+温度保護・vendor 電源ポリシー・ZRAM・重要サービスへの介入は行っていない。
+端末の再起動もしていない。
+
+
