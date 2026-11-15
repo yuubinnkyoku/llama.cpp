@@ -1287,12 +1287,75 @@ static void tiled_vec_dot_iq3_xxs_32x1(const uint32_t n, float * restrict s, con
     hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
 }
 
+// Phase 53: the two row form used to call the one row form twice, which decoded
+// the same weight tile twice. The weight decode (compact offsets, the eight
+// gathers, the finish groups and the scale vector) is now done once per tile and
+// applied to both activations, the way accum_q2_k_32x2 already does it. The
+// arithmetic per row is unchanged, so the result is bit identical to calling the
+// one row form twice; only the redundant weight work is removed.
 static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, float * restrict s1,
         const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows,
         const float * restrict sz0, const float * restrict sz1, const uint32_t * restrict grid,
         const uint8_t * restrict signs, HVX_Vector * restrict scratch) {
-    tiled_vec_dot_iq3_xxs_32x1(n, s0, vx, vy0, valid_rows, sz0, grid, signs, scratch);
-    tiled_vec_dot_iq3_xxs_32x1(n, s1, vx, vy1, valid_rows, sz1, grid, signs, scratch);
+    if (!scratch) {
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s0, vx, vy0, valid_rows, sz0, grid, signs);
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s1, vx, vy1, valid_rows, sz1, grid, signs);
+        return;
+    }
+    const uint8_t * row_tile = vx;
+    const uint8_t * activation0 = vy0;
+    const uint8_t * activation1 = vy1;
+    HVX_Vector sum0 = Q6_V_vzero();
+    HVX_Vector sum1 = Q6_V_vzero();
+    HVX_Vector d_scale = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        iq3_compact_offsets offsets = {0};
+        const int offsets_ok = iq3_compact_xxs_offsets(n, kt, &offsets);
+        if (!offsets_ok) {
+            FARF(ERROR, "ggml-hex: IQ3_XXS compact offset calculation failed : n %u kt %llu\n",
+                 n, (unsigned long long) kt);
+            abort();
+        }
+        const uint8_t * tile = row_tile + offsets.data_tile;
+        const HVX_Vector * act0 = (const HVX_Vector *) (activation0 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector * act1 = (const HVX_Vector *) (activation1 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector aux = hvx_vmemu(tile + 256);
+        if (offsets.group == 0) {
+            HVX_Vector d_pair = hvx_vmemu(row_tile + offsets.d_plane - offsets.lane * 64);
+            d_scale = Q6_V_vror_VR(d_pair, offsets.lane * 64);
+        }
+        // The gathers and the finish groups depend only on the weight tile, so
+        // they are shared by both rows. Only the multiply accumulate and the
+        // final scale differ.
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            iq3_xxs_gather_group(tile, aux, l, grid, scratch + 2 * l);
+        }
+        HVX_Vector dot0 = Q6_V_vzero();
+        HVX_Vector dot1 = Q6_V_vzero();
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const HVX_VectorPair w = iq3_xxs_finish_group(aux, l, scratch + 2 * l);
+            const HVX_Vector w_lo = Q6_V_lo_W(w);
+            const HVX_Vector w_hi = Q6_V_hi_W(w);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, w_lo, act0[2 * l]);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, w_hi, act0[2 * l + 1]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, w_lo, act1[2 * l]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, w_hi, act1[2 * l + 1]);
+        }
+        const HVX_Vector scale0 = iq3_xxs_scale_vector(d_scale, aux, act0[8]);
+        const HVX_Vector scale1 = iq3_xxs_scale_vector(d_scale, aux, act1[8]);
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot0), scale0));
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot1), scale1));
+    }
+    if (sz0) {
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vmemu(sz0));
+    }
+    if (sz1) {
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vmemu(sz1));
+    }
+    hvx_vec_store_u(s0, valid_rows * sizeof(float), sum0);
+    hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
 }
 
 static void tiled_vec_dot_iq3_s_scalar_32x1(const uint32_t n, float * restrict s,
@@ -1406,6 +1469,11 @@ static void tiled_vec_dot_iq3_s_32x1(const uint32_t n, float * restrict s, const
     hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
 }
 
+// Phase 53: NOT converted to the shared decode form. The same rewrite that works
+// for IQ3_XXS above produced a different 32-step logits hash here
+// (3b1892bf... instead of the known b21ca4bf...), so something in this kernel
+// depends on the per row call in a way that is not yet understood. Left as is
+// until the difference is found; see the phase 53 report.
 static void tiled_vec_dot_iq3_s_32x2(const uint32_t n, float * restrict s0, float * restrict s1,
         const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows,
         const float * restrict sz0, const float * restrict sz1, const uint32_t * restrict grid,
