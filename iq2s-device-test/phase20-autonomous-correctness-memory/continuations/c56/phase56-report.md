@@ -387,6 +387,25 @@ Phase 55 の観測（182 s でタイムアウト、60 s 時点で 2 スレッド
 **注意**: この 2 run は 5 トークンのプロンプトなので、`Prompt: x t/s` は
 プリフィルの性能ではなく初回トークンの所要を含む値である。prefill の比較は §3 を使う。
 
+### §6.2.1 llama-server も動く（end-to-end で確認）
+
+`llama-server` を `-ngl 44`、`-c 128`、`--port 18081` で起動し、`/completion` に
+5 トークンのプロンプトを投げた（run `p56-srv2.out`）:
+
+```
+{"index":0,"content":" Tokyo, a sprawling metropolis and global economic hub situated along Tokyo Bay on Hon", ...}
+```
+
+| 項目 | 値 |
+| --- | --- |
+| 起動 | `listening on http://127.0.0.1:18081`（ロード込み 28 s） |
+| prompt eval | 4,887 ms / 5 tokens（977 ms/token） |
+| eval | 13,761 ms / 16 tokens（**917 ms/token、1.09 t/s**） |
+| 出力 | 自然な英文 |
+
+**`llama-server` は `-ngl 44` で end-to-end に動く。** 実用入口の改善は確認できた。
+
+
 
 ### §6.3 停止時に guard が死なない問題（修正済み）
 
@@ -496,7 +515,7 @@ NGL=44、`P53_TEMP=0.7`、`P53_TOP_K=40`、`P53_TOP_P=0.95`、32 step の自由�
    decode が 3-4 倍遅くなる NGL=52 以上が使えるようになる可能性がある。
 3. **`iq3_s` の 32x8 タイル。** NGL=44 では HTP が prefill の 54% なので、
    カーネル 1.5 倍で end-to-end 15% 前後が見込める（§3.6 の実測から）。
-4. **llama-server の確認。** 今回は llama-cli だけ。server も同じ経路なら動くはずだが未検証。
+4. **llama-server の確認は完了**（§6.2.1）。`-ngl 44` で 1.09 t/s。
 5. **停止の再現条件の特定。** 25 run 中 2 回。温度・メモリ・直前の run との関係を記録し続ける。
 
 ---
