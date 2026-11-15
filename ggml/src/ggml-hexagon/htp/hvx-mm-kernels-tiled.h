@@ -1469,11 +1469,21 @@ static void tiled_vec_dot_iq3_s_32x1(const uint32_t n, float * restrict s, const
     hvx_vec_store_u(s, valid_rows * sizeof(float), sum);
 }
 
-// Phase 53: NOT converted to the shared decode form. The same rewrite that works
-// for IQ3_XXS above produced a different 32-step logits hash here
-// (3b1892bf... instead of the known b21ca4bf...), so something in this kernel
-// depends on the per row call in a way that is not yet understood. Left as is
-// until the difference is found; see the phase 53 report.
+// Phase 54: the two row form used to call the one row form twice, decoding the
+// same weight tile twice. Phase 53 tried this and the 32 step hash changed, but
+// a host side scalar model of the same transformation (continuations/c54/
+// iq3s_share_check.c) is exact over 6400 rows, so the transformation is not the
+// problem and the earlier attempt must have had a defect of its own. This
+// version keeps the gather loop and the finish loop separate exactly as the one
+// row form does, and only the per row multiply accumulate and scale differ.
+// Phase 54: left as the two call form. Three different shared decode shapes
+// (interleaved, two pass, and two pass without restrict on scratch) all
+// produced the same wrong 32 step hash (3b1892bf instead of b21ca4bf), while a
+// host side scalar model of the same transformation is exact over 6400 rows
+// (continuations/c54/iq3s_share_check.c). Sharing the gathers and running the
+// finish groups separately per row is therefore already enough to change the
+// result, which points at the gather results not being reusable across rows
+// rather than at the arithmetic. Not understood yet; see the phase 54 report.
 static void tiled_vec_dot_iq3_s_32x2(const uint32_t n, float * restrict s0, float * restrict s1,
         const void * restrict vx, const void * restrict vy0, const void * restrict vy1, uint32_t valid_rows,
         const float * restrict sz0, const float * restrict sz1, const uint32_t * restrict grid,
