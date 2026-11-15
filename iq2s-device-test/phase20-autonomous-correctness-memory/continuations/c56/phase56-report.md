@@ -1,4 +1,4 @@
-# Phase 56 - CPU 側 87% の削減: 配置の実態と prefill 2.15x
+# Phase 56 - CPU 側 87% の削減: 配置の実態と prefill 2.1-2.5x
 
 対象: 2026-11-15 23:34 〜
 作業 worktree: `D:\ghq\github.com\yuubinnkyoku\llama.cpp-c51`
@@ -127,7 +127,7 @@ FastRPC 停止時に**永久に戻らない**（実測: 400 s の timeout が 58
 
 ---
 
-## §3 目標1: prefill のスケーリング - **NGL=48 で 2.15 倍、NGL=56 で 2.59 倍**
+## §3 目標1: prefill のスケーリング - **NGL=44-48 で 2.1-2.5 倍（512 トークンで 2.65 倍）**
 
 ### §3.1 測定条件
 
@@ -259,7 +259,7 @@ wall の短縮 63.3 s は「CPU で節約した 94.1 s - HTP で増えた 30.8 s
 
 ---
 
-## §4 目標2: decode の内訳と ngl 依存 - **decode は ngl に鈍感、NGL=56 で悪化**
+## §4 目標2: decode の内訳と ngl 依存 - **decode は ngl に鈍感、NGL=52 以上で悪化**
 
 ### §4.1 decode の内訳（NGL=48、4 step）
 
@@ -334,7 +334,7 @@ NGL=52 以上はバッチ数が増えて decode が 3-4 倍遅くなる。
 テンソル配置を変えると hash は当然変わる（CPU と HTP は bit 一致しない、Phase 52）。
 Phase 56 の指示どおり、旧 hash `b21ca4bf` との一致は**要求していない**。判定は 3 点:
 
-### §5.1 再現性（同じ構成を 2 回）
+### §5.1 再現性（同じ構成を 5 回）
 
 | run | NGL | 温度 | logits sha256 (32 step) |
 | --- | --- | --- | --- |
