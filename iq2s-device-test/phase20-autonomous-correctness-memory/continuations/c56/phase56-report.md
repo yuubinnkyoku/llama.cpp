@@ -473,6 +473,22 @@ NGL=44、`P53_TEMP=0.7`、`P53_TOP_K=40`、`P53_TOP_P=0.95`、32 step の自由�
 | サンプラ | chain（temp 0.7 + top-k 40 + top-p 0.95） |
 
 **高い ngl でも temp>0 の生成が普通に動く。** 出力も自然である。
+### §8.2 実用に近い連続 run（512 prefill + 32 decode）
+
+NGL=44、512 トークンのプロンプト、32 トークンの自由生成（temp 0.7）を 1 プロセスで回した
+（run `20261116-020142-32030`、exit 0）:
+
+| 項目 | 値 |
+| --- | --- |
+| prefill 512 | **167.75 s（3.05 t/s）** |
+| decode 32 step | **765.97 ms/step（1.31 t/s）** |
+| 合計 | 約 192 s（prefill + decode） |
+| cap0 | 1.67 GHz |
+| 終了時 MemAvailable | 11.4 GB |
+| swap-out 増分 | 391,897 pages（約 1.5 GB、guard の 8 GB 以内） |
+| 温度 | 58.4 ℃ |
+
+**長いプロンプトと長い生成を続けても安定している。** ガード発動なし、OOM 兆候なし。
 
 
 
@@ -571,8 +587,10 @@ YouTube 9 回、ai.mistral.chat 8 回、launcher 7 回、twitter 6 回、Obsidia
 | probe プロセス | なし |
 | llama-cli / llama-server | なし（元から無い） |
 | replay.txt | **標準 4 トークン（`25358 11 198 760`）に復元済み** |
-| 再起動 | **していない** |
-| 給電 | AC（`AC powered: true`） |
+| 再起動 | **していない**（uptime 35,400 s = 9 時間 50 分、16:16 から継続） |
+| 給電 | AC（`AC powered: true`、残量 90%） |
+| 温度 / cap | 43 ℃ / 1.79 GHz（冷却済み） |
+| プロセス | probe / llama-cli / llama-server いずれも 0 |
 | ハーネス | `warmup-c43.sh` / `run53.sh` に測定用の環境変数を追加（既定値は不変、バックアップあり） |
 
 ---
@@ -625,8 +643,14 @@ env WANT_SKEL=288e6712... GUARD_PAGES=2097152 RUN_TIMEOUT=600 MEM_MIN_KB=4000000
     sh p53_run.sh 32 noreplay 44 samp44 0
 ```
 
-### §12.2 コミット
+### §12.2 コミット（`codex/c56-cpushare`、push 済み）
 
-（この節は push 後に確定する）
+| commit | 内容 |
+| --- | --- |
+| `f0f4b2c3f` | 配置の実態の訂正、暖機ゲート、ngl スキャン、品質（本体） |
+| `f64347103` | llama-cli が ngl 3 と 44 で動くこと（Phase 55 の記録の訂正） |
+| `61004cb9d` | 熱状態の分散、NGL=44 と 48 の同等性、サンプリング |
+| `fa4f15e7a` | llama-server の end-to-end 確認 |
+| （最終） | 連続 run と終了状態 |
 
 
