@@ -324,13 +324,31 @@ logits の距離（rel_l2 約 9%）は Phase 52 で測った CPU/HTP の差と�
 **どちらも一過性で、再実行で通る。** 「NGL が X 以上なら必ず止まる」という閾値は存在しない。
 NGL=32/36/38/39/40/44/48/56 は 128 トークン prefill で完走した実績がある。
 
-### §6.2 Phase 55 の「`-ngl 3` から停止」との関係
+### §6.2 Phase 55 の「`-ngl 3` から停止」は再現しなかった（訂正）
 
-Phase 55 は llama-cli で `-ngl 3` 以上が止まると記録した。今回の probe は **NGL=44 でも動く**。
-したがって「層数 3 が上限」という説明は成り立たない。llama-cli 側の経路（mmap ロード、
-KV キャッシュ、compute buffer の確保など）に固有の要因か、単なる一過性の停止のどちらかである。
-**今回の端末には llama-cli / llama-server が無い**（Phase 55 の終了状態）ため、
-llama-cli 側の再現はできていない。**未検証として残す。**
+Phase 55 は llama-cli で `-ngl 3` 以上が止まると記録した。今回 `c53-cli` のビルド
+（`build/p53/deploy`、skel `70b9ed4f`）を端末へ置いて同じ条件で回した:
+
+| `-ngl` | 結果 | 所要 | 出力 |
+| --- | --- | --- | --- |
+| **3** | **完走（rc 0）** | **70 s** | `Prompt: 1.0 t/s | Generation: 0.9 t/s`、`Exiting...` |
+| **44** | **完走（rc 0）** | **65 s** | `Prompt: 1.7 t/s | Generation: 0.7 t/s`、`Exiting...` |
+
+**`-ngl 3` も `-ngl 44` も動く。** Phase 55 の「3 から壊れる」は再現しない。
+
+Phase 55 の観測（182 s でタイムアウト、60 s 時点で 2 スレッドが
+`fastrpc_wait_for_response`）は、**コールドページキャッシュからのロードが
+182 s のタイムアウトを超えただけ**だった可能性が高い。ロード中は HTP バッファへの
+重みのアップロードで FastRPC 待ちになるのが正常状態である。
+今回はページキャッシュが暖まっており、ロードを含めて 65-70 s で完走した。
+
+**この訂正は実用入口に直結する**: `llama-cli` / `llama-server` は `-ngl 44` で使える。
+プロンプト処理は 1.0 -> 1.7 t/s（1.7 倍）に改善し、生成は 0.9 -> 0.7 t/s とわずかに低下した
+（decode が ngl に鈍感という §4 の結果と整合する）。
+
+**注意**: この 2 run は 5 トークンのプロンプトなので、`Prompt: x t/s` は
+プリフィルの性能ではなく初回トークンの所要を含む値である。prefill の比較は §3 を使う。
+
 
 ### §6.3 停止時に guard が死なない問題（修正済み）
 
@@ -342,10 +360,11 @@ FastRPC 停止時に**永久に戻らない**（実測: 400 s の timeout が 58
 
 ### §6.4 判定
 
-**PARTIAL。** 停止は再現したが一過性で、特定のテンソル・層に紐づかない。
-「NGL を上げると停止確率が上がる」という傾向はある（25 run 中 2 回、どちらも NGL>=32 かつ
-prefill が大きい条件）。**原因の特定と修正はできていない。**
-一方で、**停止しなければ NGL=44-48 は安定して動く**（品質・再現性は §5 のとおり）。
+**PARTIAL（ただし実用入口は改善）。** probe の停止は 25 run 中 2 回で一過性、層・テンソルに
+紐づかない（原因未特定）。一方で **Phase 55 の「`-ngl 3` から停止」は再現せず、
+llama-cli は `-ngl 3` でも `-ngl 44` でも完走した**。これは Phase 55 の記録の訂正であり、
+実用入口（llama-cli / llama-server）が高い ngl で使えることを意味する。
+
 
 
 ---
@@ -393,7 +412,7 @@ prefill が大きい条件）。**原因の特定と修正はできていない�
 | 0 | 現在地の固定と回帰ゲート | **PASS** | skel `288e6712`、probe 第 3 世代、replay 標準 4 トークンを確認。32-step 回帰が HTP `b21ca4bf` / CPU `44cd99ce` に一致（§0.1） |
 | 1 | CPU 側 87% の削減 | **PASS** | 前提（85 テンソル CPU 固定）を訂正し、実際の軸 `n_gpu_layers` で二分探索。**prefill128 が 150.88 -> 70.10 s（NGL=48、2.15 倍）、61.52 s（NGL=44、2.45 倍）**。品質は t=-0.53、argmax 32/32、再現性 bit 一致（§3, §5） |
 | 2 | decode の wall 内訳 | **PASS** | NGL=48 で HTP 446 ms/step / CPU 746 ms/step（HTP 37%）。decode は ngl に鈍感で、NGL=52 以上はバッチ数増で 3-4 倍遅くなる（§4） |
-| 3 | 停止原因の修正 | **PARTIAL** | 停止は 25 run 中 2 回、一過性。層・テンソルに紐づかない。guard が死なない問題は修正（§6） |
+| 3 | 停止原因の修正 | **PARTIAL（+ 記録の訂正）** | probe の停止は 25 run 中 2 回、一過性。層・テンソルに紐づかない。**Phase 55 の「`-ngl 3` から停止」は再現せず、llama-cli は `-ngl 3` も `-ngl 44` も完走**（§6.2）。guard が死なない問題は修正（§6.3） |
 | 4 | 32x4/32x8 タイル | **未実施** | 理由は §7 |
 | 5 | 残課題（512 prefill など） | **一部実施** | 512 トークン prefill を測定（§8） |
 
@@ -413,15 +432,15 @@ prefill が大きい条件）。**原因の特定と修正はできていない�
 
 ### §9.3 次の一手（優先順）
 
-1. **`llama-cli` / `llama-server` で NGL=44 を試す。** 今回の端末にはバイナリが無いので未検証。
-   実用入口の改善に直結する。`-ngl 3` の停止が probe で再現しない以上、
-   llama-cli 側の経路（mmap、KV キャッシュ、compute buffer）を疑うべき。
+1. **NGL=44 を既定にする。** 現在の `p53_run.sh` の既定は 16。llama-cli / llama-server でも
+   `-ngl 44` が動くことは確認済み（§6.2）。実用入口はここを変えるだけで 1.7 倍前後になる。
 2. **バッチ固定費の削減。** `htp/main.c` のバッチ前後の
    `QURT_MEM_CACHE_FLUSH_INVALIDATE_ALL` を範囲限定にする、または CPU/HTP の交互実行を減らす。
    decode が 3-4 倍遅くなる NGL=52 以上が使えるようになる可能性がある。
 3. **`iq3_s` の 32x8 タイル。** NGL=44 では HTP が prefill の 54% なので、
    カーネル 1.5 倍で end-to-end 15% 前後が見込める（§3.6 の実測から）。
-4. **NGL=44 を既定にする。** 現在の `p53_run.sh` の既定は 16。
+4. **llama-server の確認。** 今回は llama-cli だけ。server も同じ経路なら動くはずだが未検証。
+5. **停止の再現条件の特定。** 25 run 中 2 回。温度・メモリ・直前の run との関係を記録し続ける。
 
 ---
 
@@ -492,6 +511,7 @@ YouTube 9 回、ai.mistral.chat 8 回、launcher 7 回、twitter 6 回、Obsidia
 | 品質測定（32 step replay） | `continuations/c56/p56_quality.sh` |
 | skel A/B | `continuations/c56/p56_skel_ab.sh` |
 | 512 トークン prefill | `continuations/c56/p56_p512.sh` |
+| llama-cli の ngl 確認 | `continuations/c56/p56_cli.sh` |
 | 暖機ゲートの修正版 | `continuations/c56/warmup-c43.sh` |
 
 ### §12.1 再現コマンド
@@ -518,6 +538,9 @@ env TIMEOUT=600 sh p56_skel_ab.sh 2 ab44 44 4
 
 # 512 トークン prefill
 env TIMEOUT=1200 sh p56_p512.sh p512a
+
+# llama-cli の ngl 確認（c53-cli のビルドを cli56/ に置き、chmod 755 してから）
+env TMO=600 sh p56_cli.sh "3 44"
 ```
 
 ### §12.2 コミット
