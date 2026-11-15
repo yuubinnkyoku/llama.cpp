@@ -552,7 +552,7 @@ python p55_ab_analyse.py p55-ab.log
 | probe | `482032c30d2bd27f51c27d478b638ba64e1f86a467586a3190accb66ebbd2b59`（第 3 世代） |
 | probe プロセス | なし |
 | llama-cli / llama-server | なし（`ps \| awk` で本体を kill、孤児なしを確認） |
-| replay.txt | 32 トークン列（A/B の最後の状態）。**標準 4 トークンに戻すには `echo "25358 11 198 760" > libs/replay.txt`** |
+| replay.txt | **標準 4 トークン（`25358 11 198 760`）に復元済み** |
 | 前面アプリ | 測定中は触らない（ハーネスが自動で除外） |
 | 再起動 | **していない** |
 
@@ -577,3 +577,4 @@ python p55_ab_analyse.py p55-ab.log
 | `7246d9add` | `iq3_s` 167 GFLOP/s の記録 |
 | `44c153584` | HTP 36% 短縮の分離 |
 | `4d8b1ca79` | `-ngl 3` の閾値 |
+
