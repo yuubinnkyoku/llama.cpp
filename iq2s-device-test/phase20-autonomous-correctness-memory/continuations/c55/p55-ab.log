@@ -1,0 +1,12 @@
+P55_RUN tag ab-p1-1-old pair 1 order 1 arm old skel 288e6712 rc 0 exit 0 cap0_start 1785600 cap0_end 1670400 tz0_start 43400 tz0_end 54900 wall_s 204 prefill128_ms 76264.941794 decode_ms 787.889179
+P55_RUN tag ab-p1-2-new pair 1 order 2 arm new skel e311bf14 rc 0 exit 0 cap0_start 1670400 cap0_end 1670400 tz0_start 54900 tz0_end 57300 wall_s 237 prefill128_ms 93186.762621 decode_ms 1105.458554
+P55_RUN tag ab-p2-1-new pair 2 order 1 arm new skel e311bf14 rc 0 exit 0 cap0_start 1670400 cap0_end 1996800 tz0_start 56100 tz0_end 56500 wall_s 203 prefill128_ms 97473.631265 decode_ms 676.823880
+P55_RUN tag ab-p2-2-old pair 2 order 2 arm old skel 288e6712 rc 0 exit 0 cap0_start 1996800 cap0_end 1996800 tz0_start 56500 tz0_end 57600 wall_s 166 prefill128_ms 66287.526485 decode_ms 655.784023
+P55_RUN tag ab-p3-1-old pair 3 order 1 arm old skel 288e6712 rc 0 exit 0 cap0_start 1996800 cap0_end 1555200 tz0_start 57300 tz0_end 56500 wall_s 171 prefill128_ms 64703.421850 decode_ms 814.618880
+P55_RUN tag ab-p3-2-new pair 3 order 2 arm new skel e311bf14 rc 0 exit 0 cap0_start 1555200 cap0_end 1555200 tz0_start 56900 tz0_end 53800 wall_s 256 prefill128_ms 120549.152506 decode_ms 983.939974
+P55_RUN tag ab-p4-1-new pair 4 order 1 arm new skel e311bf14 rc 0 exit 0 cap0_start 1555200 cap0_end 1555200 tz0_start 53800 tz0_end 54200 wall_s 241 prefill128_ms 102026.261367 decode_ms 951.491015
+P55_RUN tag ab-p4-2-old pair 4 order 2 arm old skel 288e6712 rc 0 exit 0 cap0_start 1555200 cap0_end 1555200 tz0_start 54200 tz0_end 54200 wall_s 254 prefill128_ms 105834.923085 decode_ms 956.151888
+P55_RUN tag ab-p5-1-old pair 5 order 1 arm old skel 288e6712 rc 0 exit 0 cap0_start 1555200 cap0_end 1555200 tz0_start 54600 tz0_end 52600 wall_s 258 prefill128_ms 117575.871518 decode_ms 991.165520
+P55_RUN tag ab-p5-2-new pair 5 order 2 arm new skel e311bf14 rc 0 exit 0 cap0_start 1555200 cap0_end 1555200 tz0_start 53400 tz0_end 53000 wall_s 241 prefill128_ms 103264.318606 decode_ms 975.280546
+P55_RUN tag ab-p6-1-new pair 6 order 1 arm new skel e311bf14 rc 0 exit 0 cap0_start 1555200 cap0_end 1670400 tz0_start 53000 tz0_end 53800 wall_s 234 prefill128_ms 96874.446786 decode_ms 922.401471
+P55_RUN tag ab-p6-2-old pair 6 order 2 arm old skel 288e6712 rc 0 exit 0 cap0_start 1670400 cap0_end 1670400 tz0_start 53400 tz0_end 53800 wall_s 234 prefill128_ms 98568.386733 decode_ms 920.802396
