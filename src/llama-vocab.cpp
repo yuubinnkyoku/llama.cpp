@@ -370,6 +370,7 @@ struct llm_tokenizer_bpe : llm_tokenizer {
                 };
                 break;
             case LLAMA_VOCAB_PRE_TYPE_GPT2:
+            case LLAMA_VOCAB_PRE_TYPE_GPT2_SMALL_JAPANESE_CHAR:
             case LLAMA_VOCAB_PRE_TYPE_MPT:
             case LLAMA_VOCAB_PRE_TYPE_OLMO:
             case LLAMA_VOCAB_PRE_TYPE_JAIS:
@@ -745,20 +746,26 @@ struct llm_tokenizer_bpe_session {
                 const auto token = vocab.text_to_token(str);
 
                 if (token == LLAMA_TOKEN_NULL) {
-                    for (auto j = str.begin(); j != str.end(); ++j) {
-                        llama_token token_multibyte = LLAMA_TOKEN_NULL;
-                        if (tokenizer.byte_encode) {
-                            std::string byte_str(1, *j);
-                            token_multibyte = vocab.text_to_token(byte_str);
-                        } else {
-                            // For non-byte-encoded BPE (e.g. gemma-4), byte tokens use <0xXX> format
-                            static const char * hex = "0123456789ABCDEF";
-                            const uint8_t ch = (uint8_t)*j;
-                            const char buf[7] = { '<', '0', 'x', hex[ch >> 4], hex[ch & 15], '>', 0 };
-                            token_multibyte = vocab.text_to_token(buf);
-                        }
-                        if (token_multibyte != LLAMA_TOKEN_NULL) {
-                            output.push_back(token_multibyte);
+                    if (tok_pre == LLAMA_VOCAB_PRE_TYPE_GPT2_SMALL_JAPANESE_CHAR && (str == "Ċ" || str == "Ġ")) {
+                        // U+000A -> U+010A (Ċ) -> [UNK] (newline, use a line-break token instead)
+                        // U+0020 -> U+0120 (Ġ) -> [UNK] (half-width space, use U+3000 instead)
+                        output.push_back(vocab.text_to_token("[UNK]"));
+                    } else {
+                        for (auto j = str.begin(); j != str.end(); ++j) {
+                            llama_token token_multibyte = LLAMA_TOKEN_NULL;
+                            if (tokenizer.byte_encode) {
+                                std::string byte_str(1, *j);
+                                token_multibyte = vocab.text_to_token(byte_str);
+                            } else {
+                                // For non-byte-encoded BPE (e.g. gemma-4), byte tokens use <0xXX> format
+                                static const char * hex = "0123456789ABCDEF";
+                                const uint8_t ch = (uint8_t)*j;
+                                const char buf[7] = { '<', '0', 'x', hex[ch >> 4], hex[ch & 15], '>', 0 };
+                                token_multibyte = vocab.text_to_token(buf);
+                            }
+                            if (token_multibyte != LLAMA_TOKEN_NULL) {
+                                output.push_back(token_multibyte);
+                            }
                         }
                     }
                 } else {
@@ -2458,6 +2465,9 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             } else if (
                 tokenizer_pre == "mellum2") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_MELLUM2;
+            } else if (
+                tokenizer_pre == "gpt2-small-japanese-char") {
+                pre_type = LLAMA_VOCAB_PRE_TYPE_GPT2_SMALL_JAPANESE_CHAR;
             } else {
                 throw std::runtime_error(format("unknown pre-tokenizer type: '%s'", tokenizer_pre.c_str()));
             }
@@ -2666,6 +2676,16 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             } else {
                 id = new_id;
             }
+        }
+
+        // gpt2-small-japanese-char (zenz): the reference implementation used by Sumire
+        // (azooKey/llama.cpp) fixes these ids and ignores the tokenizer.ggml.*_id keys,
+        // so override them here as well: [UNK]=0, [PAD]=1, <s>=2, </s>=3
+        if (pre_type == LLAMA_VOCAB_PRE_TYPE_GPT2_SMALL_JAPANESE_CHAR) {
+            special_unk_id = 0;
+            special_pad_id = 1;
+            special_bos_id = 2;
+            special_eos_id = 3;
         }
 
         // Handle add_bos, add_eos and add_sep
