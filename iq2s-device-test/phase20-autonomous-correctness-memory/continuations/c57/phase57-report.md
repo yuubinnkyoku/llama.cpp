@@ -80,7 +80,7 @@ def1-r1 は **swap guard 発動**（`guard stopped=1`、pswpout 増分 2,401,731
 
 ---
 
-## §2 目標2: バッチ固定費の削減 - 進行中
+## §2 目標2: バッチ固定費の削減 - PARTIAL
 
 ### §2.1 まず実測: キャッシュ整備は固定費ではなかった
 
@@ -376,9 +376,11 @@ env TIMEOUT=600 sh p57_oppoll.sh opp1 44 2
 env TIMEOUT=1800 sh p57_q64.sh q64a
 `
 
-### §9.2 コミット（codex/c57-batchcost、push 済み）
+### §9.2 コミット（`codex/c57-batchcost`、push 済み）
 
 | commit | 内容 |
 | --- | --- |
-| 7715d82bb | 既定 NGL=44 と暖機ゲートの自動化 |
-| 8cf6ba5da | キャッシュ flush の実測（5.7 µs）、セッション依存の訂正、64-step 品質 |
+| `7715d82bb` | 既定 NGL=44 と暖機ゲートの自動化 |
+| `8cf6ba5da` | キャッシュ flush の実測（5.7 µs）、セッション依存の訂正、64-step 品質 |
+| `a5b2bf48d` | 判定・安全条件・終了状態 |
+| `fa78901f1` | 型別の残余見積り（iq3_xxs 31%、iq3_s 17%） |
