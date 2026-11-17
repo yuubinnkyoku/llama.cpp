@@ -1426,6 +1426,20 @@ ggml_tensor * rpc_server::deserialize_tensor(struct ggml_context * ctx, const rp
     return result;
 }
 
+// Server-side tensors are freshly deserialized for each RPC command and never
+// went through the backend allocator on this machine, so backends that attach
+// per-tensor metadata to tensor->extra (e.g. Hexagon's ggml_hexagon_tensor_extra)
+// see NULL and crash on their first dereference. Call the buffer's init_tensor
+// so every tensor the server touches has backend metadata before set/get/graph
+// use it.
+static void rpc_server_init_tensor(ggml_tensor * tensor) {
+    if (tensor == nullptr || tensor->buffer == nullptr) {
+        return;
+    }
+    if (tensor->extra == nullptr && tensor->buffer->iface.init_tensor) {
+        tensor->buffer->iface.init_tensor(tensor->buffer, tensor);
+    }
+}
 
 bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
     // serialization format: | rpc_tensor | cache_flag (1 byte) | offset (8 bytes) | data (size bytes) |
@@ -1453,6 +1467,7 @@ bool rpc_server::set_tensor(const std::vector<uint8_t> & input) {
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
         return false;
     }
+    rpc_server_init_tensor(tensor);
     LOG_DBG("[%s] buffer: %p, data: %p, offset: %" PRIu64 ", size: %zu\n", __func__, (void*)tensor->buffer, tensor->data, offset, size);
 
     // sanitize tensor->data
@@ -1523,6 +1538,7 @@ bool rpc_server::set_tensor_hash(const rpc_msg_set_tensor_hash_req & request, rp
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
         return false;
     }
+    rpc_server_init_tensor(tensor);
     LOG_DBG("[%s] buffer: %p, data: %p, offset: %" PRIu64 ", size: %zu, hash: %" PRIx64 "\n",
             __func__, (void*)tensor->buffer, tensor->data, request.offset, size, request.hash);
 
@@ -1569,13 +1585,10 @@ bool rpc_server::init_tensor(const rpc_msg_init_tensor_req & request) {
         }
     }
 
-    if (tensor->extra != nullptr) {
-        // This pointer can either be passed around client/server, or probably better stored server-side and kept track of.
-        // Currently unimplemented.
-        GGML_LOG_ERROR("tensor->extra populated by the backend, this is currently unsupported.\n");
-        return false;
-    }
-
+    // The backend attached its per-tensor metadata (e.g. Hexagon's extra) to
+    // this scratch tensor. Server-side tensors are initialized via
+    // rpc_server_init_tensor() at deserialize time, so an attached extra is
+    // expected: return success instead of closing the connection.
     return true;
 }
 
@@ -1593,6 +1606,7 @@ bool rpc_server::get_tensor(const rpc_msg_get_tensor_req & request, std::vector<
         GGML_LOG_ERROR("[%s] error deserializing tensor\n", __func__);
         return false;
     }
+    rpc_server_init_tensor(tensor);
     LOG_DBG("[%s] buffer: %p, data: %p, offset: %" PRIu64 ", size: %" PRIu64 "\n", __func__, (void*)tensor->buffer, tensor->data, request.offset, request.size);
 
     // sanitize tensor->data
@@ -1777,6 +1791,12 @@ bool rpc_server::graph_compute(const std::vector<uint8_t> & input) {
             const size_t hash_pos = ggml_hash_insert(&graph->visited_hash_set, graph->nodes[i]);
             graph->use_counts[hash_pos] = tensor_ptrs.at(id)->use_count;
         }
+    }
+    // Every tensor reachable from the graph nodes (including src and view_src)
+    // is now in tensor_map. Attach backend metadata (e.g. Hexagon's extra)
+    // before the backend touches the graph, or backends that require it crash.
+    for (auto & kv : tensor_map) {
+        rpc_server_init_tensor(kv.second);
     }
     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
