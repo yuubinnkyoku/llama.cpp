@@ -1,11 +1,17 @@
 file(TO_CMAKE_PATH "${HEXAGON_SDK_ROOT}"   HEXAGON_SDK_ROOT)
 file(TO_CMAKE_PATH "${HEXAGON_TOOLS_ROOT}" HEXAGON_TOOLS_ROOT)
 
+# HTP skels are cross-built with the Hexagon toolchain as separate projects.
+# When the skels are supplied pre-built (e.g. an Android app packaging a
+# ready-made libggml-htp-*.so), set this to OFF so that only the Android-side
+# backend is compiled here and the Hexagon toolchain is not required.
+option(GGML_HEXAGON_HTP_SKEL "ggml-hexagon: build the HTP skel libraries with the Hexagon toolchain" ON)
+
 if (NOT IS_DIRECTORY "${HEXAGON_SDK_ROOT}")
     message(FATAL_ERROR "Make sure HEXAGON_SDK_ROOT point to the correct Hexagon SDK installation.")
 endif()
 
-if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
+if (GGML_HEXAGON_HTP_SKEL AND NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
     message("Try to read HEXAGON_TOOLS_ROOT from hexagon_sdk.json")
     file(READ "${HEXAGON_SDK_ROOT}/hexagon_sdk.json" HEXAGON_SDK_CONFIG_PATH)
     string(JSON HEXAGON_TOOLS_PATH GET ${HEXAGON_SDK_CONFIG_PATH} "root" "tools" "info" 0 "path")
@@ -17,7 +23,11 @@ if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
     endif()
 endif()
 
-message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
+if (GGML_HEXAGON_HTP_SKEL)
+    message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
+else()
+    message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT}; HTP skel build disabled (GGML_HEXAGON_HTP_SKEL=OFF)")
+endif()
 
 include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
 include(ExternalProject)
@@ -92,13 +102,15 @@ function(build_htp_skel V)
     set(HTP_PROJECTS ${HTP_PROJECTS} PARENT_SCOPE)
 endfunction()
 
-build_htp_skel(v73)
-build_htp_skel(v75)
-build_htp_skel(v79)
-build_htp_skel(v81)
+if (GGML_HEXAGON_HTP_SKEL)
+    build_htp_skel(v73)
+    build_htp_skel(v75)
+    build_htp_skel(v79)
+    build_htp_skel(v81)
 
-# Install Hexagon skels required at runtime
-install(FILES ${HTP_SKELS} TYPE LIB)
+    # Install Hexagon skels required at runtime
+    install(FILES ${HTP_SKELS} TYPE LIB)
+endif()
 
 if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
     file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)
