@@ -541,6 +541,45 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
     tiled_vec_dot_iq3_s_32x2(ne10, dst_ptr0, dst_ptr1, w_tile, src1_col0, src1_col1, valid_rows, src2_ptr0, src2_ptr1, \
                             htp_iq3s_grid_of(octx), htp_iq3s_scratch_of(octx, ith))
 
+// Phase 58: the repacked 2D loop now hands the four row form one weight tile
+// pass for four activation rows. Only iq3_xxs has a real four row kernel; the
+// other types run their two row kernel twice, which is the same arithmetic and
+// the same work as the old two row loop, so nothing changes for them.
+#define HEX_DOT_2X4_PAIR2(FN, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    do {                                                                                    \
+        FN(ne10, d0, d1, w, c0, c1, vr, s0, s1);                                            \
+        FN(ne10, d2, d3, w, c2, c3, vr, s2, s3);                                            \
+    } while (0)
+
+#define Q4_0_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q4_0_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q4_1_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q4_1_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q8_0_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q8_0_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define IQ2S_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(IQ2S_DOT_2X2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define IQ2F_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(IQ2F_DOT_2X2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define IQ3XXS_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    tiled_vec_dot_iq3_xxs_32x4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3, \
+                               htp_iq3xxs_grid_of(octx), htp_iq3xxs_signs_of(octx), htp_iq3xxs_scratch_of(octx, ith))
+#define IQ3S_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(IQ3S_DOT_2X2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q6_K_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q6_k_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q5_K_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q5_k_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q3_K_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q3_k_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define Q2_K_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_q2_k_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define IQ4NL_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_iq4nl_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+#define MXFP4_DOT_2X4(ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3) \
+    HEX_DOT_2X4_PAIR2(tiled_vec_dot_mxfp4_32x2, ne10, d0, d1, d2, d3, w, c0, c1, c2, c3, vr, s0, s1, s2, s3)
+
+
 // Test builds (IQ3XXS_TEST_DMA_FAIL) force the first compact prefetch push per thread to fail
 #ifdef IQ3XXS_TEST_DMA_FAIL
 #define IQ3XXS_TEST_DMA_FAIL_SET(d) if ((d) == 0) pushed = false;
@@ -549,7 +588,7 @@ static inline void hvx_mm_vec_dot_32x1(struct htp_mm_context * mmctx, uint32_t i
 #endif
 
 // Specialized repacked matmul macros
-#define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1)                                                                       \
+#define MATMUL_2D_REPACKED_IMPL(SUFFIX, TILE_SIZE, DOT_2X2, DOT_2X1, DOT_2X4)                                                               \
 static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void * data) {                                                 \
     htp_matmul_preamble;                                                                                                                   \
                                                                                                                                            \
@@ -623,6 +662,39 @@ static void hvx_mm_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, void
                                                                                                                                            \
         htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, ct);                                                                             \
         uint32_t ir1 = 0;                                                                                                                  \
+        for (; ir1 + 3 < src1_nrows; ir1 += 4) {                                                                                           \
+            const uint8_t * restrict src1_col0 = (const uint8_t *) (src1_data + (ir1+0) * src1_stride);                                    \
+            const uint8_t * restrict src1_col1 = (const uint8_t *) (src1_data + (ir1+1) * src1_stride);                                    \
+            const uint8_t * restrict src1_col2 = (const uint8_t *) (src1_data + (ir1+2) * src1_stride);                                    \
+            const uint8_t * restrict src1_col3 = (const uint8_t *) (src1_data + (ir1+3) * src1_stride);                                    \
+            float * restrict dst_row0 = (float *) (dst->data + ((cur_m_start + ir1+0) * dst_row_size));                                    \
+            float * restrict dst_row1 = (float *) (dst->data + ((cur_m_start + ir1+1) * dst_row_size));                                    \
+            float * restrict dst_row2 = (float *) (dst->data + ((cur_m_start + ir1+2) * dst_row_size));                                    \
+            float * restrict dst_row3 = (float *) (dst->data + ((cur_m_start + ir1+3) * dst_row_size));                                    \
+                                                                                                                                           \
+            float * dst_ptr0 = &dst_row0[ct * 32];                                                                                         \
+            float * dst_ptr1 = &dst_row1[ct * 32];                                                                                         \
+            float * dst_ptr2 = &dst_row2[ct * 32];                                                                                         \
+            float * dst_ptr3 = &dst_row3[ct * 32];                                                                                         \
+                                                                                                                                           \
+            const float * src2_ptr0 = NULL;                                                                                                \
+            const float * src2_ptr1 = NULL;                                                                                                \
+            const float * src2_ptr2 = NULL;                                                                                                \
+            const float * src2_ptr3 = NULL;                                                                                                \
+            if (src2) {                                                                                                                    \
+                const float * restrict src2_row0 = (const float *) ((const uint8_t *) src2->data + ((cur_m_start + ir1+0) * src2_stride)); \
+                const float * restrict src2_row1 = (const float *) ((const uint8_t *) src2->data + ((cur_m_start + ir1+1) * src2_stride)); \
+                const float * restrict src2_row2 = (const float *) ((const uint8_t *) src2->data + ((cur_m_start + ir1+2) * src2_stride)); \
+                const float * restrict src2_row3 = (const float *) ((const uint8_t *) src2->data + ((cur_m_start + ir1+3) * src2_stride)); \
+                src2_ptr0 = &src2_row0[ct * 32];                                                                                           \
+                src2_ptr1 = &src2_row1[ct * 32];                                                                                           \
+                src2_ptr2 = &src2_row2[ct * 32];                                                                                           \
+                src2_ptr3 = &src2_row3[ct * 32];                                                                                           \
+            }                                                                                                                              \
+            DOT_2X4(ne10, dst_ptr0, dst_ptr1, dst_ptr2, dst_ptr3, w_tile, src1_col0, src1_col1, src1_col2, src1_col3, valid_rows,           \
+                    src2_ptr0, src2_ptr1, src2_ptr2, src2_ptr3);                                                                           \
+        }                                                                                                                                  \
+                                                                                                                                           \
         for (; ir1 + 1 < src1_nrows; ir1 += 2) {                                                                                           \
             const uint8_t * restrict src1_col0 = (const uint8_t *) (src1_data + (ir1+0) * src1_stride);                                    \
             const uint8_t * restrict src1_col1 = (const uint8_t *) (src1_data + (ir1+1) * src1_stride);                                    \
@@ -871,19 +943,19 @@ static void hvx_mm_nx_2d_repacked_##SUFFIX(unsigned int nth, unsigned int ith, v
     }                                                                                                                             \
 }
 
-MATMUL_2D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x2,  tiled_vec_dot_q4_0_32x1)
-MATMUL_2D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x2,  tiled_vec_dot_q4_1_32x1)
-MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_dot_q8_0_32x1)
-MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1)
-MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1)
-MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1)
-MATMUL_2D_REPACKED_IMPL(q3_k,       512,  tiled_vec_dot_q3_k_32x2,  tiled_vec_dot_q3_k_32x1)
-MATMUL_2D_REPACKED_IMPL(q2_k,       512,  tiled_vec_dot_q2_k_32x2,  tiled_vec_dot_q2_k_32x1)
-MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1)
-MATMUL_2D_REPACKED_IMPL(mxfp4,      544,  tiled_vec_dot_mxfp4_32x2, tiled_vec_dot_mxfp4_32x1)
+MATMUL_2D_REPACKED_IMPL(q4_0,       576,  tiled_vec_dot_q4_0_32x2,  tiled_vec_dot_q4_0_32x1, Q4_0_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q4_1,       640,  tiled_vec_dot_q4_1_32x2,  tiled_vec_dot_q4_1_32x1, Q4_1_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q8_0,       1088, tiled_vec_dot_q8_0_32x2,  tiled_vec_dot_q8_0_32x1, Q8_0_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(iq2_s,      384,  IQ2S_DOT_2X2, IQ2S_DOT_2X1, IQ2S_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(iq2f,       384,  IQ2F_DOT_2X2, IQ2F_DOT_2X1, IQ2F_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(iq3_xxs,    512,  IQ3XXS_DOT_2X2, IQ3XXS_DOT_2X1, IQ3XXS_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(iq3_s,      512,  IQ3S_DOT_2X2, IQ3S_DOT_2X1, IQ3S_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q6_k,       896,  tiled_vec_dot_q6_k_32x2,  tiled_vec_dot_q6_k_32x1, Q6_K_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q5_k,       768,  tiled_vec_dot_q5_k_32x2,  tiled_vec_dot_q5_k_32x1, Q5_K_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q3_k,       512,  tiled_vec_dot_q3_k_32x2,  tiled_vec_dot_q3_k_32x1, Q3_K_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(q2_k,       512,  tiled_vec_dot_q2_k_32x2,  tiled_vec_dot_q2_k_32x1, Q2_K_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(iq4nl,      576,  tiled_vec_dot_iq4nl_32x2, tiled_vec_dot_iq4nl_32x1, IQ4NL_DOT_2X4)
+MATMUL_2D_REPACKED_IMPL(mxfp4,      544,  tiled_vec_dot_mxfp4_32x2, tiled_vec_dot_mxfp4_32x1, MXFP4_DOT_2X4)
 
 static bool hvx_mm_transfer_src1_dma(
     struct htp_ops_context * octx,

@@ -1358,6 +1358,101 @@ static void tiled_vec_dot_iq3_xxs_32x2(const uint32_t n, float * restrict s0, fl
     hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
 }
 
+// Phase 58: four row form. The weight tile work (the compact offsets, the eight
+// gathers, the finish groups and the scale vector) depends only on the weights,
+// so four activations share it exactly like two do. The eight gather vectors in
+// scratch are the same, each group's pair is read once by the finish group.
+static void tiled_vec_dot_iq3_xxs_32x4(const uint32_t n,
+        float * restrict s0, float * restrict s1, float * restrict s2, float * restrict s3,
+        const void * restrict vx,
+        const void * restrict vy0, const void * restrict vy1, const void * restrict vy2, const void * restrict vy3,
+        uint32_t valid_rows,
+        const float * restrict sz0, const float * restrict sz1, const float * restrict sz2, const float * restrict sz3,
+        const uint32_t * restrict grid, const uint8_t * restrict signs, HVX_Vector * restrict scratch) {
+    if (!scratch) {
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s0, vx, vy0, valid_rows, sz0, grid, signs);
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s1, vx, vy1, valid_rows, sz1, grid, signs);
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s2, vx, vy2, valid_rows, sz2, grid, signs);
+        tiled_vec_dot_iq3_xxs_scalar_32x1(n, s3, vx, vy3, valid_rows, sz3, grid, signs);
+        return;
+    }
+    const uint8_t * row_tile = vx;
+    const uint8_t * activation0 = vy0;
+    const uint8_t * activation1 = vy1;
+    const uint8_t * activation2 = vy2;
+    const uint8_t * activation3 = vy3;
+    HVX_Vector sum0 = Q6_V_vzero();
+    HVX_Vector sum1 = Q6_V_vzero();
+    HVX_Vector sum2 = Q6_V_vzero();
+    HVX_Vector sum3 = Q6_V_vzero();
+    HVX_Vector d_scale = Q6_V_vzero();
+    for (uint32_t kt = 0; kt < n / 32; ++kt) {
+        iq3_compact_offsets offsets = {0};
+        const int offsets_ok = iq3_compact_xxs_offsets(n, kt, &offsets);
+        if (!offsets_ok) {
+            FARF(ERROR, "ggml-hex: IQ3_XXS compact offset calculation failed : n %u kt %llu\n",
+                 n, (unsigned long long) kt);
+            abort();
+        }
+        const uint8_t * tile = row_tile + offsets.data_tile;
+        const HVX_Vector * act0 = (const HVX_Vector *) (activation0 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector * act1 = (const HVX_Vector *) (activation1 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector * act2 = (const HVX_Vector *) (activation2 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector * act3 = (const HVX_Vector *) (activation3 + kt * HTP_MM_ACT_TILE_SIZE_Q8_0);
+        const HVX_Vector aux = hvx_vmemu(tile + 256);
+        if (offsets.group == 0) {
+            HVX_Vector d_pair = hvx_vmemu(row_tile + offsets.d_plane - offsets.lane * 64);
+            d_scale = Q6_V_vror_VR(d_pair, offsets.lane * 64);
+        }
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            iq3_xxs_gather_group(tile, aux, l, grid, scratch + 2 * l);
+        }
+        HVX_Vector dot0 = Q6_V_vzero();
+        HVX_Vector dot1 = Q6_V_vzero();
+        HVX_Vector dot2 = Q6_V_vzero();
+        HVX_Vector dot3 = Q6_V_vzero();
+        #pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const HVX_VectorPair w = iq3_xxs_finish_group(aux, l, scratch + 2 * l);
+            const HVX_Vector w_lo = Q6_V_lo_W(w);
+            const HVX_Vector w_hi = Q6_V_hi_W(w);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, w_lo, act0[2 * l]);
+            dot0 = Q6_Vw_vrmpyacc_VwVbVb(dot0, w_hi, act0[2 * l + 1]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, w_lo, act1[2 * l]);
+            dot1 = Q6_Vw_vrmpyacc_VwVbVb(dot1, w_hi, act1[2 * l + 1]);
+            dot2 = Q6_Vw_vrmpyacc_VwVbVb(dot2, w_lo, act2[2 * l]);
+            dot2 = Q6_Vw_vrmpyacc_VwVbVb(dot2, w_hi, act2[2 * l + 1]);
+            dot3 = Q6_Vw_vrmpyacc_VwVbVb(dot3, w_lo, act3[2 * l]);
+            dot3 = Q6_Vw_vrmpyacc_VwVbVb(dot3, w_hi, act3[2 * l + 1]);
+        }
+        const HVX_Vector scale0 = iq3_xxs_scale_vector(d_scale, aux, act0[8]);
+        const HVX_Vector scale1 = iq3_xxs_scale_vector(d_scale, aux, act1[8]);
+        const HVX_Vector scale2 = iq3_xxs_scale_vector(d_scale, aux, act2[8]);
+        const HVX_Vector scale3 = iq3_xxs_scale_vector(d_scale, aux, act3[8]);
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot0), scale0));
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot1), scale1));
+        sum2 = hvx_vec_add_f32_f32(sum2, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot2), scale2));
+        sum3 = hvx_vec_add_f32_f32(sum3, hvx_vec_mul_f32_f32(Q6_Vsf_equals_Vw(dot3), scale3));
+    }
+    if (sz0) {
+        sum0 = hvx_vec_add_f32_f32(sum0, hvx_vmemu(sz0));
+    }
+    if (sz1) {
+        sum1 = hvx_vec_add_f32_f32(sum1, hvx_vmemu(sz1));
+    }
+    if (sz2) {
+        sum2 = hvx_vec_add_f32_f32(sum2, hvx_vmemu(sz2));
+    }
+    if (sz3) {
+        sum3 = hvx_vec_add_f32_f32(sum3, hvx_vmemu(sz3));
+    }
+    hvx_vec_store_u(s0, valid_rows * sizeof(float), sum0);
+    hvx_vec_store_u(s1, valid_rows * sizeof(float), sum1);
+    hvx_vec_store_u(s2, valid_rows * sizeof(float), sum2);
+    hvx_vec_store_u(s3, valid_rows * sizeof(float), sum3);
+}
+
 static void tiled_vec_dot_iq3_s_scalar_32x1(const uint32_t n, float * restrict s,
         const void * restrict vx, const void * restrict vy, uint32_t valid_rows, const float * restrict sz,
         const uint32_t * restrict grid) {
