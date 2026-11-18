@@ -885,8 +885,18 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
     // should we query the remote server for the actual size
     bool rpc_get = false;
 
-    // See comments in init_tensor.
-    rpc_get |= ggml_is_quantized(tensor->type) && (tensor->ne[0] % 512 != 0) && (tensor->view_src == nullptr);
+    // The remote alloc size is not always ggml_nbytes() for quantized tensors:
+    // the Hexagon backend lays out repack types in a tiled footprint that
+    // exceeds the raw row size (Q5_K +9.1%, Q6_K +6.7%, Q4_K +11.1% per
+    // 32-wide padded row) even when ne[0] is a multiple of 512, so every
+    // quantized non-view tensor has to ask the server for its real footprint.
+    // Without this the client plans raw-sized slots and buffer totals while
+    // the server writes the larger tiled bytes: the writes then overlap the
+    // neighboring tensors and run past the end of the buffer without any
+    // error. The init_tensor shortcut keeps its narrower condition: the RPC
+    // server initializes tensor metadata on set/get/graph, so INIT_TENSOR
+    // traffic stays limited to the padding-dependent cases.
+    rpc_get |= ggml_is_quantized(tensor->type) && (tensor->view_src == nullptr);
 
     // [TAG_ALLOC_SIZE_EXPAND]
     // ops that may require additional memory for fleeting data on certain backends

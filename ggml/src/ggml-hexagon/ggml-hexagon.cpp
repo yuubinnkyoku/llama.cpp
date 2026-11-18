@@ -2925,6 +2925,28 @@ static void repack_tensor_tiled(ggml_tensor * tensor, const void * data, size_t 
 static void hex_split_capture(ggml_backend_buffer_t buffer, ggml_tensor * tensor,
                               const void * data, size_t offset, size_t size);
 
+// Diagnostic (round 6, E-2): a tiled repack write covers the full tiled
+// footprint, which is larger than ggml_nbytes() for several repack types
+// (Q5_K, Q6_K, Q4_K, ...). Locally the same buft computes the alloc sizes and
+// the layout, so this never fires; over RPC the alloc size comes from the
+// client, and if client and server ever disagree again the reserved slot is
+// too small and the tiled write silently runs past the buffer end. Turn that
+// into an error log instead of corrupted weights and an empty output.
+static void hex_log_tiled_overrun(const ggml_hexagon_shared_buffer * sbuf, const ggml_tensor * tensor) {
+    const int64_t ne0_p = hex_round_up(tensor->ne[0], 32);
+    const int64_t ne1_p = hex_round_up(tensor->ne[1], 32);
+    const size_t tiled_size = (size_t) ggml_hexagon_tiled_row_size(tensor->type, ne0_p) *
+                              (size_t) ne1_p * (size_t) tensor->ne[2] * (size_t) tensor->ne[3];
+    const uint8_t * bdata = (const uint8_t *) tensor->data;
+    const uint8_t * bend  = sbuf->base() + sbuf->size();
+    if (bdata >= bend || (size_t) (bend - bdata) < tiled_size) {
+        GGML_LOG_ERROR("ggml-hex: %s set-tensor %s : tiled footprint %zu exceeds the reserved room %zu"
+                " (data %p, buffer [%p, %p)); the tensor does not fit its slot\n",
+                sbuf->c_name(), tensor->name, tiled_size, bdata < bend ? (size_t) (bend - bdata) : 0,
+                (void *) tensor->data, (void *) sbuf->base(), (void *) bend);
+    }
+}
+
 static void ggml_backend_hexagon_buffer_set_tensor_impl(ggml_backend_buffer_t buffer,
                                                    ggml_tensor *         tensor,
                                                    const void *          data,
@@ -2976,6 +2998,7 @@ static void ggml_backend_hexagon_buffer_set_tensor_impl(ggml_backend_buffer_t bu
     }
 
     if (offset == 0 && size == ggml_nbytes(tensor) && extra->shadow_buf.empty()) {
+        hex_log_tiled_overrun(sbuf, tensor);
         repack_tensor_tiled(tensor, data, size);
         return;
     }
@@ -2987,6 +3010,7 @@ static void ggml_backend_hexagon_buffer_set_tensor_impl(ggml_backend_buffer_t bu
     extra->shadow_size += size;
 
     if (extra->shadow_size >= ggml_nbytes(tensor)) {
+        hex_log_tiled_overrun(sbuf, tensor);
         repack_tensor_tiled(tensor, extra->shadow_buf.data(), extra->shadow_buf.size());
         extra->shadow_buf.clear();
         extra->shadow_buf.shrink_to_fit();
