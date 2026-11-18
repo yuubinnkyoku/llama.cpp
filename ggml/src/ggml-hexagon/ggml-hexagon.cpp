@@ -889,6 +889,19 @@ static enum ggml_status ggml_backend_hexagon_buffer_init_tensor(ggml_backend_buf
     sbuf->tensor_extra.push_back(extra);
 
     tensor->extra = extra;
+    // Mirror the WEIGHTS branch of set_tensor_impl(): the weight/repack intent
+    // of a tensor in a weights buffer follows from the buffer usage, not only
+    // from the support-probe side channel. Locally these are the same flags
+    // set_tensor_impl() sets on the first write. Over RPC the tensors are
+    // freshly deserialized for every command and the probe never runs, so
+    // deriving the flags here keeps the set/get/graph views of the same tensor
+    // consistent (Q5_K/Q6_K weights live in the DSP tiled layout).
+    if (ggml_backend_buffer_get_usage(buffer) == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
+        extra->flags |= GGML_HEXAGON_TENSOR_WEIGHT;
+        if (ggml_hexagon_is_repack_type(tensor->type)) {
+            extra->flags |= GGML_HEXAGON_TENSOR_REPACK;
+        }
+    }
     if (tensor->type == GGML_TYPE_IQ4_XS) {
         // IQ4_XS takes its repack intent from the type, not from a support-probe
         // side effect. The probe runs before this tensor is allocated, so a

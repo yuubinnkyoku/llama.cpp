@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <thread>
+#include <stdexcept>
 
 static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
 
@@ -77,6 +78,7 @@ enum rpc_cmd {
     RPC_CMD_DEVICE_COUNT,
     RPC_CMD_GRAPH_RECOMPUTE,
     RPC_CMD_MEMSET_TENSOR,
+    RPC_CMD_BUFFER_SET_USAGE,
     RPC_CMD_NONE,
     RPC_CMD_COUNT,
 };
@@ -114,6 +116,11 @@ struct rpc_msg_get_alloc_size_rsp {
 
 struct rpc_msg_init_tensor_req {
     rpc_tensor tensor;
+};
+
+struct rpc_msg_buffer_set_usage_req {
+    uint64_t remote_ptr;
+    uint32_t usage;
 };
 
 struct rpc_msg_alloc_buffer_req {
@@ -240,6 +247,8 @@ struct ggml_backend_rpc_buffer_context {
     std::shared_ptr<rpc_dispatcher>   dispatcher;
     void                            * base_ptr;
     uint64_t                          remote_ptr;
+    // last usage value synced to the server (0xFFFFFFFF = never synced)
+    uint32_t                          sent_usage = 0xFFFFFFFF;
 };
 
 // RPC helper functions
@@ -536,18 +545,18 @@ void rpc_dispatcher::start(const std::string & endpoint) {
     std::string host;
     int port;
     if (!parse_endpoint(endpoint, host, port)) {
-        GGML_ABORT("Failed to parse endpoint: %s\n", endpoint.c_str());
+        throw std::runtime_error("Failed to parse endpoint: " + endpoint);
     }
     if (!rpc_transport_init()) {
-        GGML_ABORT("RPC transport initialization failed\n");
+        throw std::runtime_error("RPC transport initialization failed");
     }
 
     sock = socket_t::connect(host.c_str(), port);
     if (sock == nullptr) {
-        GGML_ABORT("Failed to connect to %s\n", endpoint.c_str());
+        throw std::runtime_error("Failed to connect to " + endpoint);
     }
     if (!negotiate_hello(sock)) {
-        GGML_ABORT("RPC handshake failed for %s\n", endpoint.c_str());
+        throw std::runtime_error("RPC handshake failed for " + endpoint);
     }
     LOG_DBG("[%s] connected to %s\n", __func__, endpoint.c_str());
     running = true;
@@ -594,8 +603,15 @@ static std::shared_ptr<rpc_dispatcher> get_dispatcher(const std::string & endpoi
         }
     }
 
-    auto dispatcher = std::make_shared<rpc_dispatcher>();
-    dispatcher->start(endpoint);
+    std::shared_ptr<rpc_dispatcher> dispatcher;
+    try {
+        dispatcher = std::make_shared<rpc_dispatcher>();
+        dispatcher->start(endpoint);
+    } catch (const std::exception &) {
+        // Connection failures must not abort the process: callers fall back to
+        // a no-server code path (e.g. CPU) when this returns nullptr.
+        return nullptr;
+    }
     dispatchers[endpoint] = dispatcher;
     return dispatcher;
 }
@@ -717,8 +733,27 @@ static bool rpc_use_hash_cache(const ggml_tensor * tensor, size_t size) {
     return size > HASH_THRESHOLD && tensor->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS;
 }
 
+// The ggml buffer interface has no usage callback: ggml_backend_buffer_set_usage()
+// only writes the client-side wrapper's field, so the server never learns that a
+// buffer holds model weights. Backends that derive per-tensor behavior from the
+// buffer usage (e.g. Hexagon's weight/repacked layout flags) then misbehave over
+// RPC. Sync the usage lazily: the first command touching a buffer after a usage
+// change carries the current value to the server.
+static void rpc_sync_buffer_usage(ggml_backend_buffer_t buffer, ggml_backend_rpc_buffer_context * ctx) {
+    uint32_t usage = (uint32_t) buffer->usage;
+    if (ctx->sent_usage == usage) {
+        return;
+    }
+    auto request = std::make_shared<rpc_msg_buffer_set_usage_req>();
+    request->remote_ptr = ctx->remote_ptr;
+    request->usage      = usage;
+    ctx->dispatcher->send(RPC_CMD_BUFFER_SET_USAGE, request, sizeof(*request));
+    ctx->sent_usage = usage;
+}
+
 static void ggml_backend_rpc_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     ggml_backend_rpc_buffer_context * ctx = (ggml_backend_rpc_buffer_context *)buffer->context;
+    rpc_sync_buffer_usage(buffer, ctx);
     rpc_tensor rpc_tensor = serialize_tensor(tensor);
     uint8_t cache_flag = 0;
     if (rpc_use_hash_cache(tensor, size)) {
@@ -805,6 +840,9 @@ static ggml_backend_buffer_t ggml_backend_rpc_buffer_type_alloc_buffer(ggml_back
     rpc_msg_alloc_buffer_rsp response;
 
     auto dispatcher = get_dispatcher(buft_ctx->endpoint);
+    if (dispatcher == nullptr) {
+        return nullptr;
+    }
     dispatcher->send(RPC_CMD_ALLOC_BUFFER, request, sizeof(*request), &response, sizeof(response));
     if (response.remote_ptr != 0) {
         ggml_backend_buffer_t buffer = ggml_backend_buffer_init(buft,
@@ -915,6 +953,9 @@ static size_t ggml_backend_rpc_buffer_type_get_alloc_size(ggml_backend_buffer_ty
 
         rpc_msg_get_alloc_size_rsp response;
         auto dispatcher = get_dispatcher(buft_ctx->endpoint);
+        if (dispatcher == nullptr) {
+            return ggml_nbytes(tensor);
+        }
         dispatcher->send(RPC_CMD_GET_ALLOC_SIZE, request, sizeof(*request), &response, sizeof(response));
 
         {
@@ -1099,6 +1140,9 @@ ggml_backend_buffer_type_t ggml_backend_rpc_buffer_type(const char * endpoint, u
         return it->second;
     }
     auto dispatcher = get_dispatcher(endpoint);
+    if (dispatcher == nullptr) {
+        return nullptr;
+    }
     size_t alignment = get_alignment(dispatcher, device);
     size_t max_size = get_max_size(dispatcher, device);
     ggml_backend_rpc_buffer_type_context * buft_ctx = new ggml_backend_rpc_buffer_type_context {
@@ -1142,6 +1186,11 @@ bool ggml_backend_is_rpc(ggml_backend_t backend) {
 
 void ggml_backend_rpc_get_device_memory(const char * endpoint, uint32_t device, size_t * free, size_t * total) {
     auto dispatcher = get_dispatcher(endpoint);
+    if (dispatcher == nullptr) {
+        *free = 0;
+        *total = 0;
+        return;
+    }
     auto request = std::make_shared<rpc_msg_get_device_memory_req>();
     request->device = device;
     rpc_msg_get_device_memory_rsp response;
@@ -1175,6 +1224,7 @@ public:
     bool graph_compute(const std::vector<uint8_t> & input);
     bool graph_recompute(const rpc_msg_graph_recompute_req & request);
     bool init_tensor(const rpc_msg_init_tensor_req & request);
+    bool buffer_set_usage(const rpc_msg_buffer_set_usage_req & request);
     bool get_alloc_size(const rpc_msg_get_alloc_size_req & request, rpc_msg_get_alloc_size_rsp & response);
     bool get_device_memory(const rpc_msg_get_device_memory_req & request, rpc_msg_get_device_memory_rsp & response);
 
@@ -1592,6 +1642,18 @@ bool rpc_server::init_tensor(const rpc_msg_init_tensor_req & request) {
     return true;
 }
 
+bool rpc_server::buffer_set_usage(const rpc_msg_buffer_set_usage_req & request) {
+    auto buffer = reinterpret_cast<ggml_backend_buffer_t>(request.remote_ptr);
+    auto it = buffers.find(buffer);
+    if (it == buffers.end()) {
+        LOG_DBG("[%s] unknown buffer: remote_ptr=%" PRIu64 "\n", __func__, request.remote_ptr);
+        return false;
+    }
+    ggml_backend_buffer_set_usage(*it, (enum ggml_backend_buffer_usage) request.usage);
+    LOG_DBG("[%s] remote_ptr=%" PRIu64 " usage=%u\n", __func__, request.remote_ptr, request.usage);
+    return true;
+}
+
 bool rpc_server::get_tensor(const rpc_msg_get_tensor_req & request, std::vector<uint8_t> & response) {
     struct ggml_init_params params {
         /*.mem_size   =*/ ggml_tensor_overhead(),
@@ -2003,6 +2065,16 @@ static void rpc_serve_client(const std::vector<ggml_backend_t> & backends, const
                 }
                 break;
             }
+            case RPC_CMD_BUFFER_SET_USAGE: {
+                rpc_msg_buffer_set_usage_req request;
+                if (!recv_msg(sock, &request, sizeof(request))) {
+                    return;
+                }
+                if (!server.buffer_set_usage(request)) {
+                    return;
+                }
+                break;
+            }
             case RPC_CMD_SET_TENSOR: {
                 std::vector<uint8_t> input;
                 if (!recv_msg(sock, input)) {
@@ -2345,6 +2417,9 @@ ggml_backend_reg_t ggml_backend_rpc_reg(void) {
 
 static uint32_t ggml_backend_rpc_get_device_count(const char * endpoint) {
     auto dispatcher = get_dispatcher(endpoint);
+    if (dispatcher == nullptr) {
+        return 0;
+    }
     rpc_msg_device_count_rsp response;
     dispatcher->send(RPC_CMD_DEVICE_COUNT, nullptr, 0, &response, sizeof(response));
     return response.device_count;
