@@ -251,6 +251,8 @@ x86 では 1 行もコンパイルされない。**x86 のバイナリは変更�
 
 ## §5 端末が復帰したときにやること（優先順）
 
+**p60_tiled.sh を用意してある**（sh p60_tiled.sh <stage>）。以下はその中身の説明。
+
 1. **回帰ゲート**: c58x4・NGL=44・スレッド 8 で `e9da92f8`、NGL=0 で `44cd99ce`。
 2. **Stage A（スカラー）**: `build/c60-scalar` の `libggml-cpu.so` を
    `libs/libggml-cpu.so.c60scalar` として置き、`GGML_CPU_TILED_MM=1` で
@@ -353,6 +355,7 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | NEON カーネル | `ggml/src/ggml-cpu/tiled/tiled-kernel.cpp` |
 | ARM gate | `ggml/src/ggml-cpu/tiled/tiled.cpp` |
 | 代数検証 | `continuations/c60/p60_neon_algebra.cpp` |
+| 端末用スクリプト（未実行） | `continuations/c60/p60_tiled.sh` |
 
 ### §9.1 再現コマンド
 
