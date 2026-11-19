@@ -373,3 +373,5 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | commit | 内容 |
 | --- | --- |
 | `8d595b941` | NEON dotprod microtile、ARM gate 開放（既定 OFF）、代数検証 |
+| `5d6a16e17` | 報告書（未測定を明記） |
+| `f2ad8ea2c` | x86 経路に退行なしの確認 |
