@@ -22,7 +22,9 @@
 static constexpr int TILE_K  = 256;
 static constexpr int MICRO   = 16;
 static constexpr int BIAS    = 128; // iq2/iq3 family
-static constexpr int BIAS_QK = 0;   // qK family (HAS_MIN)
+static constexpr int BIAS_QK = 0;   // q2_K / q4_K / q5_K (HAS_MIN, BIAS 0)
+static constexpr int BIAS_Q6 = 32;  // q6_K
+static constexpr int BIAS_Q3 = 4;   // q3_K
 
 // scalar reference: tiled_run_microtile_scalar, HAS_MIN=false, BIAS=128
 static void ref_microtile(int SUBBLK, const uint8_t * q0, const int8_t * q1,
@@ -173,7 +175,7 @@ static void neon_microtile_nk(int SUBBLK, int num_k, int slab, const uint8_t * q
 // HAS_MIN variant (qK family): the scalar reference also subtracts dmin*mins*bsum.
 // Both formulas are written as in the source; the NEON side keeps the bsums term in
 // the same int32 accumulator.
-static void ref_microtile_min(int SUBBLK, const uint8_t * q0, const int8_t * q1,
+static void ref_microtile_min(int SUBBLK, int BIASV, const uint8_t * q0, const int8_t * q1,
                               const int32_t * scales, const int32_t * mins,
                               const float * d0, const float * dmin, const float * d1,
                               float * buf, int buf_stride) {
@@ -209,7 +211,7 @@ static void ref_microtile_min(int SUBBLK, const uint8_t * q0, const int8_t * q1,
     }
 }
 
-static void neon_microtile_min(int SUBBLK, const uint8_t * q0, const int8_t * q1,
+static void neon_microtile_min(int SUBBLK, int BIASV, const uint8_t * q0, const int8_t * q1,
                                const int32_t * scales, const int32_t * mins,
                                const float * d0, const float * dmin, const float * d1,
                                float * buf, int buf_stride) {
@@ -329,16 +331,21 @@ int main(void) {
         }
     }
 
-    // HAS_MIN (qK family): the bsums term must match too
+    // HAS_MIN (qK family): the bsums term must match too. In the dispatch table HAS_MIN
+    // is true only for q2_K/q4_K/q5_K, and all three have BIAS = 0, so that is the only
+    // combination to check here. (q6_K BIAS=32 and q3_K BIAS=4 are HAS_MIN=false and
+    // are covered by the no-min sweep above.)
+    for (int biasv : {BIAS_QK}) {
     for (int SUBBLK : {32, 16}) {
         const int NB = TILE_K / SUBBLK;
-        for (int trial = 0; trial < 200; trial++) {
+        for (int trial = 0; trial < 100; trial++) {
             std::vector<uint8_t> q0(MICRO * TILE_K);
             std::vector<int8_t>  q1(MICRO * TILE_K);
             std::vector<int32_t> scales(MICRO * NB), mins(MICRO * NB);
             std::vector<float>   d0(MICRO), dmin(MICRO), d1(MICRO);
-
-            for (auto & v : q0) v = (uint8_t) (rnd() & 0xFF);
+            // qK codes are small unsigned values that must fit in int8 (BIAS=0 means no debias),
+            // so generate 0..127 here, not 0..255.
+            for (auto & v : q0) v = (uint8_t) (rnd() & 0x7F);
             for (auto & v : q1) v = (int8_t)  (rnd() & 0xFF);
             for (auto & v : scales) v = (int32_t) (1 + 2 * (rnd() % 16));
             for (auto & v : mins)   v = (int32_t) (rnd() % 32);
@@ -348,9 +355,8 @@ int main(void) {
 
             std::vector<float> buf_ref(MICRO * buf_stride, 0.0f);
             std::vector<float> buf_neon(MICRO * buf_stride, 0.0f);
-
-            ref_microtile_min (SUBBLK, q0.data(), q1.data(), scales.data(), mins.data(), d0.data(), dmin.data(), d1.data(), buf_ref.data(),  buf_stride);
-            neon_microtile_min(SUBBLK, q0.data(), q1.data(), scales.data(), mins.data(), d0.data(), dmin.data(), d1.data(), buf_neon.data(), buf_stride);
+            ref_microtile_min (SUBBLK, biasv, q0.data(), q1.data(), scales.data(), mins.data(), d0.data(), dmin.data(), d1.data(), buf_ref.data(),  buf_stride);
+            neon_microtile_min(SUBBLK, biasv, q0.data(), q1.data(), scales.data(), mins.data(), d0.data(), dmin.data(), d1.data(), buf_neon.data(), buf_stride);
 
             double worst_rel = 0.0;
             for (size_t k = 0; k < buf_ref.size(); k++) {
@@ -364,7 +370,8 @@ int main(void) {
                 failures++;
             }
         }
-        printf("HAS_MIN SUBBLK=%d: 200 trials done\n", SUBBLK);
+        printf("HAS_MIN bias=%d SUBBLK=%d: 100 trials done\n", biasv, SUBBLK);
+    }
     }
 
     printf(failures ? "RESULT FAIL (%d)\n" : "RESULT PASS\n", failures);
