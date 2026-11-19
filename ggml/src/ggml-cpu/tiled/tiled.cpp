@@ -569,13 +569,21 @@ static void tiled_unpack_src1_q8_K(const block_q8_K * const * rows, int n_rows, 
     }
 }
 
-// GGML_CPU_TILED_MM: master switch, on by default. If off, we fast return false and normal vec_dot mul_mat resumes
+// GGML_CPU_TILED_MM: master switch. On by default on x86 (where the microkernel is
+// hand-optimized); on ARM the NEON kernel is new, so it stays off unless asked for.
+// If off, we fast return false and normal vec_dot mul_mat resumes
 static bool ggml_tiled_matmul_enabled(void) {
+#if defined(__ARM_NEON)
+    static bool enabled = false;
+#else
     static bool enabled = true;
+#endif
     static std::once_flag flag;
     std::call_once(flag, []() {
         const char * env = getenv("GGML_CPU_TILED_MM");
-        enabled = env == NULL || atoi(env) != 0;
+        if (env != NULL) {
+            enabled = atoi(env) != 0;
+        }
     });
     return enabled;
 }
@@ -594,7 +602,7 @@ static bool ggml_tiled_matmul_forced(void) {
 // hard constraints shared by the MUL_MAT and MUL_MAT_ID entries; the src0 type gate is the
 // entries' type switch
 
-#if !defined(__AVX512VNNI__) && !defined(__AVX2__) && !defined(__AVX__)
+#if !defined(__AVX512VNNI__) && !defined(__AVX2__) && !defined(__AVX__) && !defined(__ARM_NEON)
 static bool ggml_tiled_supported(const struct ggml_tensor * src0,
                                  const struct ggml_tensor * src1) {
     UNUSED(src0);
@@ -610,6 +618,11 @@ static bool ggml_tiled_supported(const struct ggml_tensor * src0,
 
     // repack-buffer weights hold a repacked layout, let that kernel handle
     if (src0->extra != NULL) {
+        return false;
+    }
+    // the driver asserts this; every supported type is QK_K-blocked so it always holds,
+    // but the gate is the cheap place to keep a malformed tensor from reaching the assert
+    if (src0->ne[0] % TILED_TILE_K != 0) {
         return false;
     }
     // Supported quant types for src0

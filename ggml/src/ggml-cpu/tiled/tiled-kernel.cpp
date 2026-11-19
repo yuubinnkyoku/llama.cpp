@@ -10,6 +10,10 @@
 #include <immintrin.h>
 #endif
 
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
 
 // Reference implementation, slower than existing vec_dot approach
 template <int SUBBLK, bool HAS_MIN, int BIAS, int NK>
@@ -406,6 +410,75 @@ static void tiled_run_microtile_avx2(const tiled_tile_src0 & src0, const tiled_t
 
 #endif // __AVX2__
 
+#if defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+
+// NEON microkernel (dotprod).
+// SDOT is signed x signed, so the weight is debiased in-register (w = q0 - BIAS) and the
+// product is exact: no act-bias correction and no bsums term is needed when HAS_MIN is false.
+// The activation tile keeps its natural layout, so tiled_repack_src1 stays a no-op here.
+// HAS_MIN formats (qK family) fall through to the scalar reference.
+template <int SUBBLK, int NK>
+static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
+                                     int i0, int j0, int num_k, int slab, float * buf, int buf_stride) {
+    constexpr int NB = TILED_TILE_K / SUBBLK;
+    constexpr int NV = SUBBLK / 16; // 16-byte vectors per subblock
+
+    static_assert(SUBBLK == 16 || SUBBLK == 32, "unsupported SUBBLK");
+
+    // num_k/slab: the narrow path holds num_k slabs at row stride num_k*256 (num_k=1, slab=0 = standard)
+    // NK: 1 = standard single-slab (offsets 0, strides compile-time); 0 = runtime
+    const int nkr  = (NK > 0) ? NK : num_k;
+    const int seff = (NK > 0) ? 0 : slab;
+    const int qk_stride = nkr * TILED_TILE_K;
+    const int qk_off = seff * TILED_TILE_K;
+    const int nb_stride = NB * nkr;
+    const int nb_off = seff * NB;
+
+    const int8x16_t bias = vdupq_n_s8((int8_t) 128);
+
+    for (int i = 0; i < TILED_MICRO; i++) {
+        const int ar = i0 + i;
+        const int d_off = seff * TILED_MICRO + ar;
+        const float d0 = src0.d[d_off];
+        const uint8_t * q0 = &src0.q[ar * qk_stride + qk_off];
+        const int32_t * scales_row = &src0.scales[ar * nb_stride + nb_off];
+
+        // one int32x4 accumulator per src1 column, horizontal sum once at the end
+        int32x4_t acc[TILED_MICRO];
+        #pragma GCC unroll 16
+        for (int j = 0; j < TILED_MICRO; j++) {
+            acc[j] = vdupq_n_s32(0);
+        }
+
+        for (int s = 0; s < NB; s++) {
+            int8x16_t w[NV];
+            #pragma GCC unroll 2
+            for (int v = 0; v < NV; v++) {
+                w[v] = vsubq_s8(vreinterpretq_s8_u8(vld1q_u8(&q0[s * SUBBLK + 16 * v])), bias);
+            }
+            const int32x4_t scale_v = vdupq_n_s32(scales_row[s]);
+            #pragma GCC unroll 16
+            for (int j = 0; j < TILED_MICRO; j++) {
+                const int8_t * q1 = &src1.q[(j0 + j) * qk_stride + qk_off + s * SUBBLK];
+                int32x4_t d = vdupq_n_s32(0);
+                #pragma GCC unroll 2
+                for (int v = 0; v < NV; v++) {
+                    d = vdotq_s32(d, w[v], vld1q_s8(q1 + 16 * v));
+                }
+                acc[j] = vmlaq_s32(acc[j], d, scale_v);
+            }
+        }
+
+        #pragma GCC unroll 16
+        for (int j = 0; j < TILED_MICRO; j++) {
+            const int32_t s1 = vaddvq_s32(acc[j]);
+            buf[ar * buf_stride + j0 + j] += src1.d[seff * TILED_MICRO + j0 + j] * (d0 * (float) s1);
+        }
+    }
+}
+
+#endif // __ARM_NEON && __ARM_FEATURE_DOTPROD
+
 #if defined(__AVX__) && !defined(__AVX2__)
 template <int SUBBLK, bool HAS_MIN, int BIAS, int NK>
 static void tiled_run_microtile_avx(const tiled_tile_src0 & src0, const tiled_tile_src1 & src1,
@@ -528,6 +601,22 @@ void tiled_run_microtile(const tiled_tile_src0 & src0, const tiled_tile_src1 & s
         tiled_run_microtile_avx<SUBBLK, HAS_MIN, BIAS, 1>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
     } else {
         tiled_run_microtile_avx<SUBBLK, HAS_MIN, BIAS, 0>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+    }
+#elif defined(__ARM_NEON) && defined(__ARM_FEATURE_DOTPROD)
+    // NEON dotprod: exact signed MAC, no act-bias and no bsums term, so only the
+    // HAS_MIN == false formats are handled here; qK falls through to the scalar reference.
+    if constexpr (!HAS_MIN) {
+        if (standard) {
+            tiled_run_microtile_neon<SUBBLK, 1>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+        } else {
+            tiled_run_microtile_neon<SUBBLK, 0>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+        }
+        return;
+    }
+    if (standard) {
+        tiled_run_microtile_scalar<SUBBLK, HAS_MIN, BIAS, 1>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
+    } else {
+        tiled_run_microtile_scalar<SUBBLK, HAS_MIN, BIAS, 0>(src0, src1, i0, j0, num_k, slab, buf, buf_stride);
     }
 #else
     if (standard) {
