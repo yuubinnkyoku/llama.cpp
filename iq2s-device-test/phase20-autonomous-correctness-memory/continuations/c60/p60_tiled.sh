@@ -5,6 +5,7 @@
 #   sh p60_tiled.sh <stage> [tag]
 #
 #   stage = gate   : regression gate on the current standard skel (c58x4)
+#   stage = unit   : the tiled matmul unit test (test-tiled-mulmat), no model needed
 #   stage = a      : Stage A, scalar microtile, GGML_CPU_TILED_MM=1
 #   stage = b      : Stage B, NEON microtile, GGML_CPU_TILED_MM=1
 #   stage = ab     : speed A/B, baseline cpu vs NEON+tiled, ABBA
@@ -89,6 +90,25 @@ run128() {
 echo "P60 start stage $STAGE tag $TAG skel $(sha256sum $L/libggml-htp-v81.so | cut -d' ' -f1) cap0 $(cap) tz0 $(tz0) uptime $(cut -d' ' -f1 /proc/uptime)"
 
 case "$STAGE" in
+unit)
+    # the tiled matmul unit test: compares tiled against the standard path for every
+    # supported type, no model and no probe needed. This is the cheapest way to find
+    # out whether the NEON kernel is numerically right on the device.
+    U=$BASE/c60unit
+    if [ ! -x "$U/test-tiled-mulmat" ]; then
+        echo "P60_UNIT missing $U/test-tiled-mulmat"
+        exit 2
+    fi
+    echo "P60_UNIT start cap0 $(cap) tz0 $(tz0)"
+    LD_LIBRARY_PATH=$U ADSP_LIBRARY_PATH=$U "$U/test-tiled-mulmat" > $BASE/p60-unit.log 2>&1
+    RC=$?
+    echo "P60_UNIT rc $RC pass $(grep -c PASS $BASE/p60-unit.log) fail $(grep -c FAIL $BASE/p60-unit.log)"
+    grep -E 'FAIL' $BASE/p60-unit.log | head -10
+    LD_LIBRARY_PATH=$U ADSP_LIBRARY_PATH=$U "$U/test-tiled-mulmat" --fuzz > $BASE/p60-unit-fuzz.log 2>&1
+    RC2=$?
+    echo "P60_UNIT fuzz rc $RC2 pass $(grep -c PASS $BASE/p60-unit-fuzz.log) fail $(grep -c FAIL $BASE/p60-unit-fuzz.log)"
+    grep -E 'FAIL' $BASE/p60-unit-fuzz.log | head -10
+    ;;
 gate)
     set_cpu $L/libggml-cpu.so.c44bak $CPU_BASE || exit 2
     cp $L/replay32.txt $L/replay.txt
