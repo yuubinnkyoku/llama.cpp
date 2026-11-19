@@ -411,3 +411,6 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | `0b2acdd55` | qK 系（HAS_MIN）も NEON で処理、BIAS をテンプレート引数に |
 | `26fda0beb` | 報告書に qK 対応と BIAS バグの経緯 |
 | `0df93a6d5` | 最終 hash、MSVC 警告は既存 |
+| `ef02dced4` / `8e57e185b` | 端末用スクリプト `p60_tiled.sh` |
+| `f80aee664` | 代数検証を実在するテンプレート組み合わせに修正 |
+| `9ba19b0a7` | 検証側のバグ 2 件も記録 |
