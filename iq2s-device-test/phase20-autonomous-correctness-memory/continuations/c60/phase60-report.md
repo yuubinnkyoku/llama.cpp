@@ -85,7 +85,7 @@ NEON カーネルは `#if defined(__ARM_FEATURE_DOTPROD)` でコンパイルア�
 | ビルド | sha256 | サイズ | `sdot` 命令 | `microtile_neon` シンボル |
 | --- | --- | --- | --- | --- |
 | `build/c60-scalar`（armv8-a） | `380a1278d583abc8c23223cc2c903301cae9dc0f6aed86f5e91ce55eafcf7094` | 6,193,776 B | **0** | **0** |
-| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `c2c5f536e0d4fad5bbb48aab517737f6029698310dcd5fa98e2ec0618d153b60` | 6,193,776 B | **1,216** | 4（`<16,0> <16,1> <32,0> <32,1>`） |
+| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5` | 6,193,776 B | **1,216** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
 | 現行標準（Phase 59 の `0a3db9c5`） | `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9` | 4,903,128 B | 0 | 0 |
 
 **スカラービルドに `sdot` が 0 個、NEON ビルドに 1,216 個**あることを objdump で確認した。
@@ -119,8 +119,12 @@ NEON カーネルは `#if defined(__ARM_FEATURE_DOTPROD)` でコンパイルア�
 - **int32 で厳密に積算し、最後に 1 回だけ float スケール**。
   スカラー参照は「サブブロックごとに float でスケールして float で積算」なので
   **丸め順序が違う**（＝ hash は変わる）。代数は同じ。
-- **HAS_MIN の型（qK 系）はスカラーにフォールバック**。`if constexpr (!HAS_MIN)` で分岐。
-  本モデルの CPU 側 5 型（`iq2_xxs`/`iq2_xs`/`iq2_s`/`iq3_xxs`/`iq3_s`）はすべて HAS_MIN=false。
+- **`BIAS` はテンプレート引数**。iq2/iq3 系は符号付きコードを `value + 128` で持つので BIAS=128、
+  qK 系は小さな符号なし値がそのまま int8 に収まるので **BIAS=0**。
+  最初これを 128 に固定して書いてしまい、**ホスト側の代数検証が 400/400 で落ちて発見した**（§2.3）。
+- **HAS_MIN の型（qK 系）も NEON で処理する**。bsums 項はもう 1 本の int32 積算器で足りるので、
+  `acc_min[j] += bsum * mins[s]` を積んでおき、最後に `dmin * acc_min` を引く。
+  これで **13 型すべてが NEON パスに入る**（スカラーフォールバックは無くなった）。
 
 **dispatch の順序**（`tiled_run_microtile`）:
 
@@ -161,8 +165,15 @@ NEON カーネルはこのホスト（x86）では実行できないが、**代�
 | 狭パス（num_k=2）、SUBBLK=16 | 50 | **一致** |
 | 狭パス（num_k=4）、SUBBLK=32 | 50 | **一致** |
 | 狭パス（num_k=4）、SUBBLK=16 | 50 | **一致** |
+| **HAS_MIN**（qK 系）、SUBBLK=32 | 200 | **一致** |
+| **HAS_MIN**（qK 系）、SUBBLK=16 | 200 | **一致** |
 
-**合計 600 試行すべて一致。** 相対誤差の閾値は 1e-4（float の丸め順序の差のみを許容）。
+**合計 1,000 試行すべて一致。** 相対誤差の閾値は 1e-4（float の丸め順序の差のみを許容）。
+
+**この検証は実際にバグを 1 つ捕まえた。** 最初の実装は `BIAS` を 128 に固定していたが、
+qK 系の BIAS は 0 である。HAS_MIN の 400 試行が**すべて**失敗したことで気づき、
+テンプレート引数に直した。**実機に持っていく前に見つかった**のは大きい
+（実機だと「品質が合わない」としか分からず、原因の特定に時間がかかる）。
 
 **int32 オーバーフローの確認**: 積算器の最大絶対値は **1.23e7**（SUBBLK=32）、
 **1.11e7**（SUBBLK=16）で、int32 の上限 2.15e9 に対して **約 175 倍の余裕**がある。
@@ -320,7 +331,7 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | --- | --- |
 | **skel の最終 sha256** | **未確認**（端末不達。Phase 59 終了時は `76dd89e3…`） |
 | **CPU バイナリ（端末上）** | **未変更**（端末に触れていない。Phase 59 終了時は `0a3db9c5…`） |
-| 新ビルド（ホスト） | `build/c60-scalar` = `380a1278…`、`build/c60-neon` = `c2c5f536…` |
+| 新ビルド（ホスト） | `build/c60-scalar` = `380a1278…`、`build/c60-neon` = `c5499c18…` |
 | replay | 未変更（端末に触れていない） |
 | プロセス | 該当なし |
 | 前面アプリ停止 | 0 回（run なし） |
@@ -357,11 +368,11 @@ cmake -B build/c60-neon -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.
   -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm \
   -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
 cmake --build build/c60-neon --target ggml-cpu -j 8
-# -> c2c5f536e0d4fad5bbb48aab517737f6029698310dcd5fa98e2ec0618d153b60
+# -> c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5
 
 # 代数検証（ホスト）
 g++ -O2 -o p60_neon_algebra p60_neon_algebra.cpp && ./p60_neon_algebra
-# -> RESULT PASS（600 試行）
+# -> RESULT PASS（1000 試行）
 
 # 命令の確認
 llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c sdot
@@ -373,5 +384,6 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | commit | 内容 |
 | --- | --- |
 | `8d595b941` | NEON dotprod microtile、ARM gate 開放（既定 OFF）、代数検証 |
+| `0b2acdd55` | qK 系（HAS_MIN）も NEON で処理、BIAS をテンプレート引数に |
 | `5d6a16e17` | 報告書（未測定を明記） |
 | `f2ad8ea2c` | x86 経路に退行なしの確認 |
