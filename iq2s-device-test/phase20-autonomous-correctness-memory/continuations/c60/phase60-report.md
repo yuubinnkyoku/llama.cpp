@@ -193,6 +193,43 @@ qK 系の BIAS は 0 である。HAS_MIN の試行が**すべて**失敗した�
 ランダムな最悪ケース（q0 0-255、q1 -128..127、scale 1-31）での値なので、
 実データでも余裕は十分と判断できる。**ただし実機の実データで測ったわけではない。**
 
+### §2.3.2 ドライバ全体の検証: 既存の unit test を通した（ホスト側、実測）
+
+	ests/test-tiled-mulmat.cpp は **tiled パスと標準パスの結果を全型で比較する**
+テストで、モデルも probe も要らない。これを x86 でビルドして実行した。
+
+**通常モード（13 型 + MUL_MAT_ID 2 件）**:
+
+`
+TEST 256x512 * 512x256 (q6_K):    PASS (max_err: 0.000031, tolerance: 0.001)
+TEST 256x512 * 512x256 (q5_K):    PASS (max_err: 0.000046)
+TEST 256x512 * 512x256 (q4_K):    PASS (max_err: 0.000053)
+TEST 256x512 * 512x256 (q3_K):    PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (q2_K):    PASS (max_err: 0.000038)
+TEST 256x512 * 512x256 (iq4_xs):  PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq2_xxs): PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq2_xs):  PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq2_s):   PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq3_xxs): PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq3_s):   PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq1_s):   PASS (max_err: 0.000031)
+TEST 256x512 * 512x256 (iq1_m):   PASS (max_err: 0.000031)
+TEST mul_mat_id ... (q4_K):       PASS (max_err: 0.000040)
+TEST mul_mat_id ... (iq2_xxs):    PASS (max_err: 0.000031)
+`
+
+**--fuzz モード: 88 件すべて PASS、FAIL 0 件。**
+
+これは **ドライバ・unpacker・タイル組み立て・書き戻し**まで含めた検証である
+（§2.3 の代数検証は microkernel の式だけを見ていた）。x86 では AVX2 カーネルが
+通るので、**NEON カーネルそのものの検証にはならない**が、
+「tiled の骨格が正しく、型ごとの unpack が正しい」ことはこれで担保される。
+
+**ARM 版のテストバイナリもビルドしてある**（uild/c60-armtest/bin/test-tiled-mulmat、
+sha256 459a0ca0cb3b048f96954adcf8e6634dd0e141501dca88e522182837e5c7fe6）。
+端末に置けば **モデル不要で数秒**で NEON カーネルの数値検証ができる。
+p60_tiled.sh unit がこれを実行する。
+
 ### §2.3.1 x86 経路に退行がないことの確認（ホスト側、実測）
 
 gate の変更は x86 と ARM で共有されるファイルに入っているので、
@@ -265,6 +302,8 @@ x86 では 1 行もコンパイルされない。**x86 のバイナリは変更�
 ## §5 端末が復帰したときにやること（優先順）
 
 **p60_tiled.sh を用意してある**（sh p60_tiled.sh <stage>）。以下はその中身の説明。
+
+**最初に `unit` を実行すること。** モデル不要・数秒で終わり、NEON カーネルの数値的な正しさが分かる（§2.3.2 のテストを端末で回す）。ここで落ちたら以降の段階に進む意味はない。
 
 1. **回帰ゲート**: c58x4・NGL=44・スレッド 8 で `e9da92f8`、NGL=0 で `44cd99ce`。
 2. **Stage A（スカラー）**: `build/c60-scalar` の `libggml-cpu.so` を
