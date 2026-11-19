@@ -84,7 +84,7 @@ NEON カーネルは `#if defined(__ARM_FEATURE_DOTPROD)` でコンパイルア�
 
 | ビルド | sha256 | サイズ | `sdot` 命令 | `microtile_neon` シンボル |
 | --- | --- | --- | --- | --- |
-| `build/c60-scalar`（armv8-a） | `380a1278d583abc8c23223cc2c903301cae9dc0f6aed86f5e91ce55eafcf7094` | 6,193,776 B | **0** | **0** |
+| `build/c60-scalar`（armv8-a） | `eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a` | 6,193,776 B | **0** | **0** |
 | `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5` | 6,193,776 B | **1,216** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
 | 現行標準（Phase 59 の `0a3db9c5`） | `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9` | 4,903,128 B | 0 | 0 |
 
@@ -297,6 +297,11 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 5. **x86 経路に退行はない。** gate 変更は共有ファイルに入っているが、
    `__ARM_NEON` は x86 で未定義なので x86 のコードは変わらない。
    objdump で `vpmaddubsw` 116 個・`sdot` 0 個を確認した。
+   MSVC の `#pragma GCC unroll` 警告 8 件は**変更前から存在する**（AVX2 カーネル内、
+   294-372 行）。NEON コードは `#if defined(__ARM_NEON)` の中なので MSVC では
+   コンパイルされず、警告は増えていない。
+6. **ホスト側の代数検証が実バグを 1 つ捕まえた。** BIAS を 128 に固定していたのが
+   qK 系では誤り（正しくは 0）。実機に持っていく前に発見できた。
 
 ### §6.3 確定していないこと（正直に分ける）
 
@@ -331,7 +336,7 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | --- | --- |
 | **skel の最終 sha256** | **未確認**（端末不達。Phase 59 終了時は `76dd89e3…`） |
 | **CPU バイナリ（端末上）** | **未変更**（端末に触れていない。Phase 59 終了時は `0a3db9c5…`） |
-| 新ビルド（ホスト） | `build/c60-scalar` = `380a1278…`、`build/c60-neon` = `c5499c18…` |
+| 新ビルド（ホスト） | `build/c60-scalar` = `eba4af55…`、`build/c60-neon` = `c5499c18…` |
 | replay | 未変更（端末に触れていない） |
 | プロセス | 該当なし |
 | 前面アプリ停止 | 0 回（run なし） |
@@ -359,7 +364,7 @@ cmake -B build/c60-scalar -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchai
   -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a \
   -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
 cmake --build build/c60-scalar --target ggml-cpu -j 8
-# -> 380a1278d583abc8c23223cc2c903301cae9dc0f6aed86f5e91ce55eafcf7094
+# -> eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a
 
 # Stage B ビルド（NEON + dotprod）
 cmake -B build/c60-neon -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.cmake \
