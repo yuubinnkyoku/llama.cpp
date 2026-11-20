@@ -88,8 +88,8 @@ NEON カーネルは `#if defined(__ARM_FEATURE_DOTPROD)` でコンパイルア�
 
 | ビルド | sha256 | サイズ | `sdot` 命令 | `microtile_neon` シンボル |
 | --- | --- | --- | --- | --- |
-| `build/c60-scalar`（armv8-a） | `eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a` | 6,193,776 B | **0** | **0** |
-| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5` | 6,193,776 B | **1,216** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
+| `build/c60-scalar`（armv8-a） | `238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63` | 6,193,776 B | **0** | **0** |
+| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4` | 6,193,776 B | **1,216** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
 | 現行標準（Phase 59 の `0a3db9c5`） | `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9` | 4,903,128 B | 0 | 0 |
 
 **スカラービルドに `sdot` が 0 個、NEON ビルドに 1,216 個**あることを objdump で確認した。
@@ -398,7 +398,7 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | --- | --- |
 | **skel の最終 sha256** | **未確認**（端末不達。Phase 59 終了時は `76dd89e3…`） |
 | **CPU バイナリ（端末上）** | **未変更**（端末に触れていない。Phase 59 終了時は `0a3db9c5…`） |
-| 新ビルド（ホスト） | `build/c60-scalar` = `eba4af55…`、`build/c60-neon` = `c5499c18…` |
+| 新ビルド（ホスト） | `build/c60-scalar` = `238b0983…`、`build/c60-neon` = `7b7d9335…` |
 | replay | 未変更（端末に触れていない） |
 | プロセス | 該当なし |
 | 前面アプリ停止 | 0 回（run なし） |
@@ -428,7 +428,7 @@ cmake -B build/c60-scalar -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchai
   -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a \
   -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
 cmake --build build/c60-scalar --target ggml-cpu -j 8
-# -> eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a
+# -> 238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
 
 # Stage B ビルド（NEON + dotprod）
 cmake -B build/c60-neon -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.cmake \
@@ -437,7 +437,7 @@ cmake -B build/c60-neon -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.
   -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm \
   -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
 cmake --build build/c60-neon --target ggml-cpu -j 8
-# -> c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5
+# -> 7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
 
 # 代数検証（ホスト）
 g++ -O2 -o p60_neon_algebra p60_neon_algebra.cpp && ./p60_neon_algebra
@@ -467,3 +467,5 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | `ecb14b2be` | unit を最初に実行する旨を明記 |
 | `4ea2c8df5` / `62190eb7b` | unit test の結果を判定と成果物に追加 |
 | `0b27de89f` | 接続試行の詳細 |
+| `663be2839` | HAS_MIN でない型の dmin/mins 読み出しを止める |
+| `3436c315c` | スクリプトの hash を再ビルド後の値に更新 |
