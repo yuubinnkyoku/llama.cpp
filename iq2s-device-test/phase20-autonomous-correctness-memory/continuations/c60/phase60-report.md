@@ -462,3 +462,8 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | `ef02dced4` / `8e57e185b` | 端末用スクリプト `p60_tiled.sh` |
 | `f80aee664` | 代数検証を実在するテンプレート組み合わせに修正 |
 | `9ba19b0a7` | 検証側のバグ 2 件も記録 |
+| `64ddc5e10` | コミット一覧の完成 |
+| `075986fbc` | モデル不要の unit stage を追加 |
+| `ecb14b2be` | unit を最初に実行する旨を明記 |
+| `4ea2c8df5` / `62190eb7b` | unit test の結果を判定と成果物に追加 |
+| `0b27de89f` | 接続試行の詳細 |
