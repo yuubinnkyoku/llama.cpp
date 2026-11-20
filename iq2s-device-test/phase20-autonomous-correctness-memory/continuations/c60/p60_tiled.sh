@@ -11,8 +11,8 @@
 #   stage = ab     : speed A/B, baseline cpu vs NEON+tiled, ABBA
 #
 # The two new cpu backends must already be on the device:
-#   libs/libggml-cpu.so.c60scalar  eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a
-#   libs/libggml-cpu.so.c60neon    c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5
+#   libs/libggml-cpu.so.c60scalar  238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
+#   libs/libggml-cpu.so.c60neon    7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
 # and the baseline:
 #   libs/libggml-cpu.so.c44bak     0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9
 set -u
@@ -23,8 +23,8 @@ TAG=${2:-p60}
 TIMEOUT=${TIMEOUT:-1800}
 SKEL=76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef
 CPU_BASE=0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9
-CPU_SCALAR=eba4af55457b2ad19f3199237f4974229dfa2fa7ac99e6906138d4b15659e16a
-CPU_NEON=c5499c18431c2d236713408d33e6b38de1a676bb214e85fea0c1334cec7f2db5
+CPU_SCALAR=238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
+CPU_NEON=7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
 
 cap() { cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null; }
 tz0() { cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null; }
