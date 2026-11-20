@@ -357,6 +357,9 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
    コンパイルされず、警告は増えていない。
 6. **ホスト側の代数検証が実バグを 1 つ捕まえた。** BIAS を 128 に固定していたのが
    qK 系では誤り（正しくは 0）。実機に持っていく前に発見できた。
+7. **既存の unit test が x86 で全件通る。** `test-tiled-mulmat` の通常 15 件と
+   fuzz 88 件がすべて PASS。ドライバ・unpacker・書き戻しまで含めて骨格は正しい。
+   **ARM 版のバイナリもビルド済み**なので、端末ではモデル不要で数秒の検証ができる。
 
 ### §6.3 確定していないこと（正直に分ける）
 
@@ -409,6 +412,7 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | ARM gate | `ggml/src/ggml-cpu/tiled/tiled.cpp` |
 | 代数検証 | `continuations/c60/p60_neon_algebra.cpp` |
 | 端末用スクリプト（未実行） | `continuations/c60/p60_tiled.sh` |
+| ARM 版 unit test（未実行） | `build/c60-armtest/bin/test-tiled-mulmat`（`f459a0ca…`） |
 
 ### §9.1 再現コマンド
 
