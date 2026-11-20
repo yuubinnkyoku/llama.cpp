@@ -445,10 +445,12 @@ static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_t
         const int ar = i0 + i;
         const int d_off = seff * TILED_MICRO + ar;
         const float d0 = src0.d[d_off];
-        const float dmin0 = src0.dmin[d_off];
+        // dmin/mins are only filled by the unpackers of the HAS_MIN formats; reading them
+        // for the others would touch uninitialised tile memory, so keep it conditional.
+        const float dmin0 = HAS_MIN ? src0.dmin[d_off] : 0.0f;
         const uint8_t * q0 = &src0.q[ar * qk_stride + qk_off];
         const int32_t * scales_row = &src0.scales[ar * nb_stride + nb_off];
-        const int32_t * mins_row = &src0.mins[ar * nb_stride + nb_off];
+        const int32_t * mins_row = HAS_MIN ? &src0.mins[ar * nb_stride + nb_off] : nullptr;
 
         // one int32x4 accumulator per src1 column, horizontal sum once at the end
         int32x4_t acc[TILED_MICRO];
