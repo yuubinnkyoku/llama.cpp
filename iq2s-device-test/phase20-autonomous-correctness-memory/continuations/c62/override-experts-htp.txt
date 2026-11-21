@@ -1,0 +1,3 @@
+^$=CPU
+blk\.[0-9]+\.ffn_gate_up_exps\.weight=HTP
+blk\.[0-9]+\.ffn_down_exps\.weight=HTP
