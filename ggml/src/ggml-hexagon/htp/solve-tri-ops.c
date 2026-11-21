@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "hex-common.h"
-#include "htp-trace.h"
+#include "hex-profile.h"
 
 #define GGML_COMMON_DECL_C
 #include "ggml-common.h"
@@ -13,16 +13,14 @@
 #include "htp-tensor.h"
 #include "hvx-types.h"
 #include "hvx-utils.h"
-#include "solve-tri-ops.h"
 
 struct htp_solve_tri_context {
-    struct htp_ops_context *               octx;
-    const struct htp_solve_tri_kernel_params * kparams;
-    uint32_t                               jobs_per_hvx;
-    uint32_t                               total_jobs;
-    uint32_t                               job_start;
-    uint32_t                               k_chunks;
-    uint32_t                               col_block;
+    struct htp_ops_context * octx;
+    uint32_t                 jobs_per_thread;
+    uint32_t                 total_jobs;
+    uint32_t                 job_start;
+    uint32_t                 k_chunks;
+    uint32_t                 col_block;
 };
 
 static inline void solve_tri_row_scalar(const float * A_row,
@@ -79,10 +77,9 @@ static inline void solve_tri_row_hvx(const float * A_row,
 }
 
 // Batch-level thread: each job is one full batch.
-static void solve_tri_batch_thread_f32(const htp_thread_t * th, unsigned int nth, unsigned int ith, void * data) {
+static void solve_tri_batch_thread_f32(unsigned int nth, unsigned int ith, void * data) {
     struct htp_solve_tri_context * sctx = (struct htp_solve_tri_context *) data;
     struct htp_ops_context *       octx = sctx->octx;
-    const struct htp_solve_tri_kernel_params * kparams = sctx->kparams;
 
     const struct htp_tensor * src0 = octx->src[0];  // A
     const struct htp_tensor * src1 = octx->src[1];  // B
@@ -94,16 +91,16 @@ static void solve_tri_batch_thread_f32(const htp_thread_t * th, unsigned int nth
     const uint32_t ne02 = src0->ne[2];
 
     const uint32_t col_block = VLEN_FP32;
-    const uint32_t k_full    = k & ~(col_block - 1);
+    const uint32_t k_full    = (k / col_block) * col_block;
 
-    const uint32_t start_batch = sctx->job_start + sctx->jobs_per_hvx * ith;
-    const uint32_t end_batch   = MIN(start_batch + sctx->jobs_per_hvx, sctx->job_start + sctx->total_jobs);
+    const uint32_t start_batch = sctx->job_start + sctx->jobs_per_thread * ith;
+    const uint32_t end_batch   = MIN(start_batch + sctx->jobs_per_thread, sctx->job_start + sctx->total_jobs);
 
-    struct htp_thread_trace * tr = th->trace;
+    struct htp_thread_trace * tr = &octx->ctx->trace[ith];
     htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) start_batch);
 
     for (uint32_t batch = start_batch; batch < end_batch; ++batch) {
-        const uint32_t i03 = fastdiv(batch, &kparams->div_ne02);
+        const uint32_t i03 = batch / ne02;
         const uint32_t i02 = batch - i03 * ne02;
 
         const float * A_batch =
@@ -141,10 +138,9 @@ static void solve_tri_batch_thread_f32(const htp_thread_t * th, unsigned int nth
 }
 
 // Chunk-level thread: each job is one (batch, col_chunk) pair.
-static void solve_tri_chunk_thread_f32(const htp_thread_t * th, unsigned int nth, unsigned int ith, void * data) {
+static void solve_tri_chunk_thread_f32(unsigned int nth, unsigned int ith, void * data) {
     struct htp_solve_tri_context * sctx = (struct htp_solve_tri_context *) data;
     struct htp_ops_context *       octx = sctx->octx;
-    const struct htp_solve_tri_kernel_params * kparams = sctx->kparams;
 
     const struct htp_tensor * src0 = octx->src[0];  // A
     const struct htp_tensor * src1 = octx->src[1];  // B
@@ -155,17 +151,17 @@ static void solve_tri_chunk_thread_f32(const htp_thread_t * th, unsigned int nth
 
     const uint32_t ne02 = src0->ne[2];
 
-    const uint32_t start_job = sctx->job_start + sctx->jobs_per_hvx * ith;
-    const uint32_t end_job   = MIN(start_job + sctx->jobs_per_hvx, sctx->job_start + sctx->total_jobs);
+    const uint32_t start_job = sctx->job_start + sctx->jobs_per_thread * ith;
+    const uint32_t end_job   = MIN(start_job + sctx->jobs_per_thread, sctx->job_start + sctx->total_jobs);
 
-    struct htp_thread_trace * tr = th->trace;
+    struct htp_thread_trace * tr = &octx->ctx->trace[ith];
     htp_trace_event_start(tr, HTP_TRACE_EVT_HVX_COMP, (uint16_t) start_job);
 
     for (uint32_t job = start_job; job < end_job; ++job) {
-        const uint32_t batch = fastdiv(job, &kparams->div_k_chunks);
+        const uint32_t batch = job / sctx->k_chunks;
         const uint32_t chunk = job - batch * sctx->k_chunks;
 
-        const uint32_t i03 = fastdiv(batch, &kparams->div_ne02);
+        const uint32_t i03 = batch / ne02;
         const uint32_t i02 = batch - i03 * ne02;
 
         const float * A_batch =
@@ -202,17 +198,36 @@ int op_solve_tri(struct htp_ops_context * octx) {
     const struct htp_tensor * src0 = octx->src[0];  // A
     const struct htp_tensor * src1 = octx->src[1];  // B
     const struct htp_tensor * dst  = octx->dst;     // X
-    const struct htp_solve_tri_kernel_params * kparams =
-        (const struct htp_solve_tri_kernel_params *) octx->kernel_params;
+
+    if (src0->type != HTP_TYPE_F32 || src1->type != HTP_TYPE_F32 || dst->type != HTP_TYPE_F32) {
+        return HTP_STATUS_NO_SUPPORT;
+    }
+
+    // left=true, lower=true, uni=false only
+    if (src0->ne[0] != src0->ne[1]) {
+        return HTP_STATUS_INVAL_PARAMS;
+    }
+    if (src0->ne[1] != src1->ne[1]) {
+        return HTP_STATUS_INVAL_PARAMS;
+    }
+    if (src0->ne[2] != src1->ne[2] || src0->ne[3] != src1->ne[3]) {
+        return HTP_STATUS_INVAL_PARAMS;
+    }
+    if (dst->ne[0] != src1->ne[0] || dst->ne[1] != src1->ne[1] || dst->ne[2] != src1->ne[2] ||
+        dst->ne[3] != src1->ne[3]) {
+        return HTP_STATUS_INVAL_PARAMS;
+    }
 
     if (htp_tensor_is_extended(src0) || htp_tensor_is_extended(src1) || htp_tensor_is_extended(dst)) {
         return HTP_STATUS_NO_SUPPORT;
     }
 
-    const uint32_t col_block     = kparams->col_block;
-    const uint32_t k_chunks      = kparams->k_chunks;
-    const uint32_t total_batches = kparams->total_batches;
-    const bool     batched       = (kparams->batched != 0);
+    const uint32_t k = src1->ne[0];
+
+    const uint32_t col_block     = VLEN_FP32;
+    const uint32_t k_chunks      = (k + col_block - 1) / col_block;
+    const uint32_t total_batches = src0->ne[2] * src0->ne[3];
+    const bool     batched       = total_batches >= (uint32_t) octx->n_threads;
 
     FARF(HIGH, "solve-tri: (%ux%ux%ux%u) x (%ux%ux%ux%u) -> (%ux%ux%ux%u) : batched %d\n",
          src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
@@ -224,7 +239,9 @@ int op_solve_tri(struct htp_ops_context * octx) {
         uint32_t njobs     = total_batches;
 
         if (octx->ctx->mdev.count > 1) {
-            const struct htp_tensor_mdev_range range = htp_tensor_mdev_partition(total_batches, htp_tensor_mdev_data_aligned(dst) ? kparams->batches_per_chunk : 0, octx->ctx->mdev.idx, octx->ctx->mdev.count, &octx->ctx->mdev.count_div);
+            const uint32_t batch_size = dst->nb[2];
+            const uint32_t batches_per_chunk = (batch_size > 0) ? (HEX_L2_LINE_SIZE / hex_gcd_u32(batch_size, HEX_L2_LINE_SIZE)) : 1;
+            const struct htp_tensor_mdev_range range = htp_tensor_mdev_partition(total_batches, htp_tensor_mdev_data_aligned(dst) ? batches_per_chunk : 0, octx->ctx->mdev.idx, octx->ctx->mdev.count, &octx->ctx->mdev.count_div);
             job_start = range.start;
             njobs     = range.count;
         }
@@ -233,25 +250,22 @@ int op_solve_tri(struct htp_ops_context * octx) {
             return HTP_STATUS_OK;
         }
 
-        if (!htp_ops_context_set_n_hvx(octx, MIN(kparams->n_hvx, njobs))) {
-            return HTP_STATUS_INVAL_PARAMS;
-        }
-
-        const uint32_t n_hvx = octx->n_hvx;
+        // Batch-level parallelism
+        const uint32_t n_threads = octx->n_threads;
 
         struct htp_solve_tri_context sctx = {
             .octx            = octx,
-            .kparams         = kparams,
-            .jobs_per_hvx    = fastdiv(njobs + n_hvx - 1, &octx->n_hvx_div),
+            .jobs_per_thread = fastdiv(njobs + n_threads - 1, &octx->n_threads_div),
             .total_jobs      = njobs,
             .job_start       = job_start,
             .k_chunks        = k_chunks,
             .col_block       = col_block,
         };
 
-        work_queue_run(octx->ctx->hvx_queue, solve_tri_batch_thread_f32, &sctx, n_hvx);
+        work_queue_run(octx->ctx->work_queue, solve_tri_batch_thread_f32, &sctx, n_threads);
     } else {
-        const uint32_t total_jobs = kparams->total_jobs;
+        // Chunk-level parallelism
+        const uint32_t total_jobs = total_batches * k_chunks;
 
         uint32_t job_start = 0;
         uint32_t njobs     = total_jobs;
@@ -267,23 +281,18 @@ int op_solve_tri(struct htp_ops_context * octx) {
             return HTP_STATUS_OK;
         }
 
-        if (!htp_ops_context_set_n_hvx(octx, MIN(kparams->n_hvx, njobs))) {
-            return HTP_STATUS_INVAL_PARAMS;
-        }
-
-        const uint32_t n_hvx = octx->n_hvx;
+        const uint32_t n_threads = octx->n_threads;
 
         struct htp_solve_tri_context sctx = {
             .octx            = octx,
-            .kparams         = kparams,
-            .jobs_per_hvx    = fastdiv(njobs + n_hvx - 1, &octx->n_hvx_div),
+            .jobs_per_thread = fastdiv(njobs + n_threads - 1, &octx->n_threads_div),
             .total_jobs      = njobs,
             .job_start       = job_start,
             .k_chunks        = k_chunks,
             .col_block       = col_block,
         };
 
-        work_queue_run(octx->ctx->hvx_queue, solve_tri_chunk_thread_f32, &sctx, n_hvx);
+        work_queue_run(octx->ctx->work_queue, solve_tri_chunk_thread_f32, &sctx, n_threads);
     }
 
     return HTP_STATUS_OK;
