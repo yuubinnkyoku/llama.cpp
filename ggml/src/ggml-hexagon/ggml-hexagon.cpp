@@ -6901,6 +6901,15 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
 
+    // diagnostic: small-m matmuls are not covered by the tiled HTP kernels
+    static const bool opt_small_mm_cpu = []() {
+        const char * e = getenv("GGML_HEXAGON_SMALL_MM_CPU");
+        return e ? atoi(e) != 0 : false;
+    }();
+    if (opt_small_mm_cpu && src0->ne[1] < 512) {
+        return false;
+    }
+
     if (dst->type != GGML_TYPE_F32) {
         return false;
     }
@@ -7019,6 +7028,10 @@ static bool ggml_hexagon_supported_mul_mat(const struct ggml_hexagon_session * s
                 return false;
             }
             if (src0->nb[1] < src0->nb[0]) {
+                return false;
+            }
+            // the f32 kernel is 2D only; the looped mix matmuls are 3D batched
+            if (src0->ne[2] > 1 || src0->ne[3] > 1) {
                 return false;
             }
             if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
@@ -9608,6 +9621,9 @@ static bool ggml_hexagon_supported_cont(const struct ggml_hexagon_session * sess
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
         src0->type != GGML_TYPE_I32) return false;
 
+    // the HTP copy kernel does not handle strided 3D/4D sources
+    if (!ggml_is_contiguous(src0) || src0->ne[2] > 1 || src0->ne[3] > 1) return false;
+
     return true;
 }
 
@@ -9697,6 +9713,21 @@ static bool ggml_backend_hexagon_device_supports_op(ggml_backend_dev_t dev, cons
     // reject ops that match the filter
     if (opt_opfilter && std::regex_match(ggml_op_desc(op), *opt_opfilter)) {
         return false;
+    }
+
+    // diagnostic: keep batched (3D/4D) ops on the CPU
+    static const bool opt_2d_only = []() {
+        const char * e = getenv("GGML_HEXAGON_2D_ONLY");
+        return e ? atoi(e) != 0 : false;
+    }();
+    if (opt_2d_only && op->op != GGML_OP_MUL_MAT_ID) {
+        const bool structural = op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE ||
+            op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE;
+        const bool batched = op->ne[2] > 1 || op->ne[3] > 1 ||
+            (op->src[0] && (op->src[0]->ne[2] > 1 || op->src[0]->ne[3] > 1));
+        if (batched && !structural) {
+            return false;
+        }
     }
 
     // pin FFN matmuls to CPU when offload gating is disabled
