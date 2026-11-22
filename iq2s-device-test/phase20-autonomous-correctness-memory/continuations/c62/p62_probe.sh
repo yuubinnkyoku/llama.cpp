@@ -78,7 +78,7 @@ if [ "${LOAD_ONLY:-0}" = "1" ]; then
         > "$R/stdout.txt" 2> "$R/stderr.txt" &
     PID=$!
     # A weight placement that does not fit can hang the device, so sample the
-    # free memory every 5 s and stop the load at the hard abort line.
+    # free memory every second and stop the load at the hard abort line.
     (
         while kill -0 $PID 2>/dev/null; do
             AV=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
@@ -90,7 +90,7 @@ if [ "${LOAD_ONLY:-0}" = "1" ]; then
                 kill -KILL $PID 2>/dev/null
                 break
             fi
-            sleep 5
+            sleep 1
         done
     ) &
     LMON=$!
