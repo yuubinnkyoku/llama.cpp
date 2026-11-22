@@ -77,6 +77,23 @@ if [ "${LOAD_ONLY:-0}" = "1" ]; then
     timeout -k 10 -s TERM 300 $L/decode-probe $M $BASE/${OVERRIDE:-override-inkling.txt} $STEPS $R/logits.f32 mmap $DEV $NGL \
         > "$R/stdout.txt" 2> "$R/stderr.txt" &
     PID=$!
+    # A weight placement that does not fit can hang the device, so sample the
+    # free memory every 5 s and stop the load at the hard abort line.
+    (
+        while kill -0 $PID 2>/dev/null; do
+            AV=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+            echo "$(date +%s) $AV $(awk '/SwapFree/{print $2}' /proc/meminfo) $(awk '/^pswpout /{print $2}' /proc/vmstat)" >> "$R/memlog.txt"
+            if [ -n "$AV" ] && [ "$AV" -lt "${LOAD_ABORT_KB:-2000000}" ]; then
+                echo "LOAD_MEM_GUARD $AV" >> "$R/guard.txt"
+                kill -TERM $PID 2>/dev/null
+                sleep 2
+                kill -KILL $PID 2>/dev/null
+                break
+            fi
+            sleep 5
+        done
+    ) &
+    LMON=$!
     n=0
     while kill -0 $PID 2>/dev/null; do
         if grep -q "warm_wait_begin" "$R/stdout.txt" 2>/dev/null; then break; fi
@@ -90,11 +107,19 @@ if [ "${LOAD_ONLY:-0}" = "1" ]; then
         grep -E '^(MemAvailable|SwapFree|MemFree|Cached):' /proc/meminfo
         grep -E '^pswpout ' /proc/vmstat
         grep -a "load_ms" "$R/stdout.txt"
+        grep -a "model buffer size" "$R/stderr.txt" | tail -4
     } >> "$R/manifest.txt"
     kill -TERM $PID 2>/dev/null
     sleep 2
     kill -KILL $PID 2>/dev/null
+    # timeout may not forward the kill to its child; do not leave a probe with
+    # the model buffers allocated behind.
+    for p in $(pidof decode-probe 2>/dev/null); do
+        kill -KILL $p 2>/dev/null
+    done
+    kill $LMON 2>/dev/null
     wait $PID 2>/dev/null
+    wait $LMON 2>/dev/null
     echo "RC $?" > "$R/rc.txt"
     exit 0
 fi

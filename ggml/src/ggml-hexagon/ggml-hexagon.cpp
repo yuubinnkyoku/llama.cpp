@@ -7120,8 +7120,22 @@ static bool ggml_hexagon_supported_mul_mat_id(const struct ggml_hexagon_session 
             return false;
     }
 
+    // The model loader probes MUL_MAT_ID with a 512 token dummy op and a zero
+    // sized placeholder buffer. Size that probe for 32 tokens so the expert
+    // weights can be placed on the device; the graph-time call checks the real
+    // ubatch shape and can still fall back.
+    const bool placement_probe = !src0->buffer ||
+        ggml_backend_buffer_get_size(src0->buffer) == 0;
+    struct ggml_tensor src1_probe;
+    const struct ggml_tensor * src1_check = src1;
+    if (placement_probe && src1->ne[2] > 32) {
+        src1_probe = *src1;
+        src1_probe.ne[2] = 32;
+        src1_check = &src1_probe;
+    }
+
     struct htp_mm_kernel_params kparams;
-    ggml_hexagon_precompute_matmul_params(sess, src0, src1, dst, &kparams);
+    ggml_hexagon_precompute_matmul_params(sess, src0, src1_check, dst, &kparams);
     if (kparams.kernel_type == HTP_MM_KERNEL_UNSUPPORTED || (size_t) kparams.vtcm_size > sess->vtcm_size) {
         HEX_VERBOSE("ggml-hex: %s supported MUL_MAT_ID VTCM size needed (%d) > budget (%zu)\n", sess->c_name(), kparams.vtcm_size, sess->vtcm_size);
         return false;

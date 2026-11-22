@@ -6,6 +6,7 @@
 2. **専門家 matmul は HTP ではなく CPU で動いている。** scheduler は op を「重みテンソルの backend」に割り当てる。expert テンソルは loader の判定で CPU_Mapped（mmap）に落ちているため、gate/up（IQ2_XXS）も down（IQ4_NL）も CPU 実行になる。HTP compute buffer が 25.10 MiB のままなのが、重みコピーが起きていない証拠。
 3. **専門家を HTP に置く実験で端末が再起動した。** `override-experts-htp.txt` で expert を HTP に強制すると HTP model buffer が **11,363 MiB** まで育ち、その直後に端末がハングして再起動（16:11 JST、boot_id 更新、uptime リセット）。load は完走していない（`PHASE load_end` なし）。再試行しない。
 4. **Phase 63 の主目標（IQ2_XXS MUL_MAT_ID の HTP カーネル）は単独では効かない。** カーネルを足しても、重みが HTP メモリに無い限り op は CPU に割り当てられる。重みを HTP に置くには約 11.4 GB の rpcmem が必要で、この端末では再起動を招く。
+5. **C（down 専門家の部分配置）は実装・検証済み。** loader の配置 probe を 32 token で見積もる host 変更で IQ4_NL down が HTP に載る。NUB=8 の 32-step で replay hash `be30a788...` 一致、swap 0.008 GiB、prefill 1.4 倍、decode は横ばい（CPU gate/up が律速）。詳細は §6。
 
 ## §1 split timing の実測
 
@@ -61,3 +62,51 @@ Phase 63 の当初計画（IQ2_XXS MUL_MAT_ID カーネル追加）は、重み�
 - 端末: 2026-11-22 16:11 に再起動（事故）。16:18 時点 uptime 6 分、MemAvailable 2.6 GB（起動直後）、`/data` 空き 7.1 GB、モデル・libs は無事。
 - ブランチ `codex/c61-inkling2`、c63 の report と probe 更新を追加予定。
 - Phase 62 の gate8（32-step、709.6 ms/step、swap 0.605 GiB）は pre-reboot の記録。post-reboot では再測定が必要。
+
+## §6 C: down 専門家の部分 HTP 配置（2026-11-22 実装・検証）
+
+### 6.1 実装
+
+- `ggml_hexagon_supported_mul_mat_id` に配置 probe 用の VTCM 見積もりを追加した。loader は 512 token のダミー op で判定するため、ゼロサイズのプレースホルダ buffer を持つ場合だけ src1 を 32 token に丸めて VTCM を見積もる。graph 時の判定は実形状のまま。
+- skel の変更は不要（IQ4_NL の MUL_MAT_ID カーネルは既存）。
+- 新しい既定では loader が IQ4_NL down 専門家を HTP に配置する。CPU 参照用に `override-down-cpu.txt`、段階テスト用に `override-down-6/12/24.txt` を追加。
+
+### 6.2 段階 load テスト（LOAD_ONLY、中止線 MemAvailable 2 GB、5 秒監視）
+
+| 配置 | HTP model buffer | load 中の MemAvailable 最小 | 結果 |
+| --- | --- | --- | --- |
+| down 6 層 | 2,250.61 MiB | 8.64 GB | load_end、再起動なし |
+| down 12 層 | 3,344.11 MiB | 5.44 GB | load_end、再起動なし |
+| down 24 層 | 5,531.11 MiB | 5.44 GB | load_end、再起動なし |
+
+### 6.3 ubatch 8 が必須
+
+- NUB=32 の reserve は 32-token の worst-case graph で down MUL_MAT_ID を CPU に落とし、HTP 重みの CPU コピー（12 層 x 182 MiB = **2,196.85 MiB**）を確保してしまう。
+- NUB=8 にすると CPU compute buffer は 12.31 MiB、splits 1307/654 になり、down は pp/tg とも HTP で動く。
+- 1 step の実測: down CPU 979 ms に対し down HTP + NUB=8 は **466 ms**。
+
+### 6.4 A/B（32 step、NUB=8、同一セッション近接）
+
+| 項目 | down CPU | down HTP |
+| --- | --- | --- |
+| 最初の token / logit | 182416 / 27.2587242 | **182416 / 27.2587242** |
+| prefill 5 token | 3,521 ms | **2,113 ms** |
+| decode 32-step 平均 | 1,272.5 ms/step | 1,310.8 ms/step |
+| splits (pp/tg) | 1305 / 652 | 1305 / 652 |
+| swap 増分 | 0.57 GiB | **0.008 GiB** |
+| 出力 | 同一テキスト | 同一テキスト |
+
+- decode は速くならない。CPU 側の gate/up（IQ2_XXS）が律速で、down を HTP に移しても split 同期が相殺する。prefill は 1.4 倍速く、swap はほぼゼロになる。
+- **4-token replay hash は `be30a788...` と一致**（2 回同一）。Phase 62 の基準と bit 一致なので、IQ4_NL ID カーネルの数値は CPU と同一と判断できる。§13.C の採用条件（replay hash 一致、同一セッション A/B、swap 1.5 GiB 内）を満たす。
+
+## §7 B: CPU の dotprod/i8mm ビルド（実験、結論は保留）
+
+- NDK の既定ビルドは dotprod/i8mm 無効。`-march=armv8.7-a+dotprod+i8mm` を `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS` で入れて `libggml-cpu.so` を作り（sha256 `a3b7d4e7...`）、端末で SIGILL なく動作することを確認した。
+- split timing の比較は run 間のばらつき（page cache と swap）が大きく、1 回ずつの比較では効果を分離できなかった。CPU 合計は dotprod 1,406 ms 対 既定 946 ms と逆転しており、環境差と判断する。
+- 次段は同一 run 内で比較できる形（CPU variant dispatch、または `test-backend-ops` の IQ2_XXS ベンチ）で測る。端末の libggml-cpu.so は既定ビルド（`ac7cc94c...`）に戻してある。
+
+## §8 状態と次の一手
+
+- 端末: 16:11 の再起動後、uptime 3 時間 20 分。MemAvailable 10〜11 GB、`/data` 空き 7.1 GB。残存プロセスなし。
+- ブランチ `codex/c61-inkling2`: 本 report、ホスト変更（VTCM probe cap）、override 4 種、probe 更新を追加して push する。
+- 推奨: C の構成（down HTP + NUB=8）を Phase 63 の基準構成にする。decode の改善には D（IQ2_XXS の ID カーネル）が必要だが、gate/up も HTP に置くと HTP model buffer は約 10 GB になり、2026-11-22 の全配置実験（11.4 GB で再起動）と同水準になる。実施には所有者の判断と段階 load テストが必須。
