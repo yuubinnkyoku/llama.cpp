@@ -92,3 +92,50 @@ mem:    MemAvailable=10 GB (10818244 kB)
 - 32-step の品質ゲート PASS は不変。64-step は任意タスクのため、測定成立を優先してここで打ち切る。
 
 端末（02:51、ゲート経由で確認）: uptime 2 時間 18 分（00:32 再起動後、追加再起動なし）、MemAvailable 11.3 GB、SwapFree 10.9 GB、`/data` 空き 4.9 GB、残存 probe なし。
+
+## §8 追記（04:30）: 64-step 品質ゲート PASS、凍結 hash 再確認、CPU variant A/B v3
+
+### 8.1 64-step 品質ゲート（warmup 付きで成立）
+
+`gate with --project inkling2 --min-mem 11`（04:15 にロック取得、MemAvailable 12.16 GB で開始）。
+
+| run | HTP model buffer | decode | swap 増分 | 判定 |
+| --- | --- | --- | --- | --- |
+| warm_cpu（8 step） | 1,157.11 MiB | 2,056.6 ms/step | 0.92 GiB | warmup（判定外） |
+| **cpu64** | 1,157.11 MiB | **1,376.0 ms/step** | **0.43 GiB** | **有効** |
+| warm_htp（8 step） | 5,348.86 MiB | 1,112.8 ms/step | 0 GiB | warmup（判定外） |
+| **htp64** | 5,348.86 MiB | **696.0 ms/step** | **0.48 GiB** | **有効** |
+
+- warmup を各構成の直前に置くことで、64-step の swap を 1.5 GiB 未満に収められた（前回の冷間 1.59/1.63 GiB から改善）。
+- 品質ゲート（64 step、down CPU 参照 vs down HTP 既定 23 層）:
+
+| 指標 | 値 | 基準 | 判定 |
+| --- | --- | --- | --- |
+| argmax 一致 | **64 / 64** | 31/32 相当 | **PASS** |
+| NLL 平均差（HTP - CPU） | **+0.001747** | 有意差なし | PASS |
+| NLL 差の t 値 | **+0.8330** | ±1 | **PASS**（32 step の -1.31 も解消） |
+| logit 差 mean_abs / max_abs | 0.1794 / 2.4251 | - | 小さい |
+| 相関（最小 / 平均） | 0.99152 / 0.99868 | - | 高い |
+| CPU argmax が HTP top10 内 | 64 / 64 | - | PASS |
+
+- 同じセッションでの decode は cpu64 1,376.0 ms/step に対し htp64 696.0 ms/step（約 2.0 倍）。
+
+### 8.2 凍結 hash の再確認
+
+`gate with --min-mem 11` で 2 run:
+- h1: `65dd1c563da7f1fb24dc53a362d4acff4afb184bd98f04df96f4d513d5ca661d`（HTP buffer 5,348.86 MiB、swap 18,726 pages）
+- h2: `65dd1c563da7f1fb24dc53a362d4acff4afb184bd98f04df96f4d513d5ca661d`（5,348.86 MiB、swap 0）
+- 最初の token は 182416、logit 27.2482471。**凍結基準は c66 の変更後も不変。**
+
+### 8.3 CPU variant A/B v3（8 run、参考）
+
+variant の sha256（base `ac7cc94c`、dot `a3b7d4e7`）を確認した同一セッション 8 run。warmup 込み。b3 はホスト adb デーモン再起動で欠測、b4 は 249.4 ms/step の外れ値。
+
+- base: a1 905.9 / a2 809.4 / a3 1,055.7 / a4 1,337.4 ms/step
+- dot: b1 602.8 / b2 737.1 ms/step（有効 2 点）
+- dot が速い方向だが、ドリフトと外れ値で確定不能。**採用判断は保留。** 次はマイクロベンチ。
+
+### 8.4 端末・ゲート状態（04:26〜04:29）
+
+- 端末: uptime 3 時間 56 分（00:32 の再起動後、追加再起動なし）、MemAvailable 12.2 GB、SwapFree 10.9 GB、`/data` 空き 4.8 GB、残存 probe なし。
+- gate status（04:26:31）: lock HELD project=c61（pid 13000、heartbeat 1s）。他プロジェクトの run が継続中。こちらは待機後に実行。
