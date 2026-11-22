@@ -1,0 +1,21 @@
+Phase 65 hashes (2026-11-23)
+
+baseline, down CPU (CPU reference):
+  replay 4 tokens 182416 13 68014 371:
+  be30a788c131537de787d97557f5367aae66daeefd699c5f6a7cc29dba6bc723
+  (32-step logits: c64a_cpu)
+
+baseline, down HTP 24 layers (explicit override):
+  4d89f1cd85e35588cb434b91b356fa88fb449227a891db4daa016a5f3fdcd56f
+
+baseline, down HTP default 23 layers (frozen Phase 65 hash):
+  65dd1c563da7f1fb24dc53a362d4acff4afb184bd98f04df96f4d513d5ca661d
+  confirmed by c64replay_def1/2, c65hash2, c65m_rep1/2
+
+quality gate (32 steps, down CPU vs down HTP default):
+  argmax 32/32, NLL delta mean -0.0035, t -1.31
+  logit mean_abs 0.1543, max_abs 1.7808, corr min 0.99687 mean 0.99911
+
+device libs after restore:
+  libggml-htp-v81.so 76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef
+  libggml-hexagon.so c87765f76821cc891a4937f5391a422d3158147ade8f9a2eefc4a0b3f1c2c1f9
