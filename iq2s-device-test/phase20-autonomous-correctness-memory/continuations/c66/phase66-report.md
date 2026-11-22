@@ -76,3 +76,19 @@ mem:    MemAvailable=10 GB (10818244 kB)
 - 02:21〜02:40 の間、別プロジェクト c61（`llama.cpp-c51` の 27B e2e）がゲートを使用。こちらの `gate with` は待機後に実行された（キューとして機能）。
 - 端末: uptime 1 時間 48 分（00:32 の再起動後、追加再起動なし）、MemAvailable 11.5 GB（run 前）、`/data` 空き 7.1 GB、残存 probe なし。
 - 変更はコミット `4af0c62f1`（ハーネス初版）に続き、本追記と LF 修正を追加コミットする。
+
+## §7 追記（02:52）: 64-step 品質ゲートは測定不成立（swap guard）
+
+タスク 2 を `gate with --project inkling2 --min-mem 11` で試行（ゲートの 11 GB チェックは OK、開始 MemAvailable 11.5 GB）。
+
+| run | HTP model buffer | 完走 step | swap 増分 | 判定 |
+| --- | --- | --- | --- | --- |
+| cpu64（down CPU 参照） | 1,157.11 MiB | 24 / 64 で guard 停止 | 415,677 pages = 1.59 GiB | 無効 |
+| htp64（既定 23 層） | 5,348.86 MiB | 1 / 64 で guard 停止 | 426,588 pages = 1.63 GiB | 無効 |
+
+- どちらも最初の token は 182416（cpu logit 27.2587242、htp 27.2482471）で配置は正しい（buffer サイズで確認）。しかし 64 step の途中で swap 増分が 1.5 GiB を超え、guard が停止した。
+- 原因: 冷えた page cache でのモデル load churn。32-step の基準 run が warmup 後の 0.008 GiB だったのに対し、今回は冷間で 1.5 GiB を超えた。
+- 対策（次回）: 各構成で warmup run（8 step）を先に走らせ、その直後に測定 run を置く。warmup の swap は測定 run に数えない（測定 run の guard はそのまま）。
+- 32-step の品質ゲート PASS は不変。64-step は任意タスクのため、測定成立を優先してここで打ち切る。
+
+端末（02:51、ゲート経由で確認）: uptime 2 時間 18 分（00:32 再起動後、追加再起動なし）、MemAvailable 11.3 GB、SwapFree 10.9 GB、`/data` 空き 4.9 GB、残存 probe なし。
