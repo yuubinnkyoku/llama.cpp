@@ -72,3 +72,8 @@
 
 - 端末: uptime 8 時間 16 分（16:11 再起動後、追加再起動なし）。MemAvailable 10〜12 GB、`/data` 7.1 GB。
 - ブランチ: 本節、c63 §9 訂正、probe の 1 秒監視、c64 override 群を追加して push する。
+
+### 6.5 replay hash（既定 23 層配置）
+
+- down HTP 既定（23 層、NUB=8）: `65dd1c563da7f1fb24dc53a362d4acff4afb184bd98f04df96f4d513d5ca661d`（2 回一致）
+- 参考: down CPU `be30a788...`、down HTP 24 層 `4d89f1cd...`
