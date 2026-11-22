@@ -49,3 +49,30 @@ mem:    MemAvailable=10 GB (10818244 kB)
 - `c66/p62_probe.sh`: `LIBDIR` 対応（ライブラリディレクトリを切り替えて同一 probe を実行）
 - CPU lib 2 種の sha256: base `ac7cc94c1aa5d2516f5f7dd9a5829c552b940b07edb228c82f9883cda2bd29ce`、dot `a3b7d4e7d330d0bebe19ff3b5aa2deae62e47592f26875b2c09ce61f2f58bf0f`
 - 端末状態（02:21）: uptime 1 時間 49 分（00:32 の再起動後、追加再起動なし）、MemAvailable 10 GB、swap 残 11.8 GB、`/data` 空き 7.1 GB、残存 probe なし。
+
+## §5 追記（02:40）: A/B ハーネス成立、データは示唆的だが未確定
+
+修正点:
+- MSYS のパス変換は `export MSYS_NO_PATHCONV=1` で解決（Windows 形式のローカルパス + リモートは `/data/...` のまま）。
+- probe script の CRLF を LF に正規化（Android の sh は `set -u\r` を解釈できない）。
+- variant lib の sha256 を run 前に検証（base `ac7cc94c`、dot `a3b7d4e7`）。
+
+結果（down CPU 構成、NUB=8、16 step、A/B/B/A、warmup 1 回、開始 MemAvailable 11.5 GB）:
+
+| run | variant | decode ms/step | swap (pages) |
+| --- | --- | --- | --- |
+| warm | base | 888.1 | 232,427 |
+| a1 | base | 687.9 | 146,492 |
+| b1 | dot | 707.6 | 32,818 |
+| b2 | dot | 837.8 | 197 |
+| a2 | base | 1,129.3 | 2,479 |
+
+- base 平均 908.6、dot 平均 772.7（-15%）だが、base の幅 688〜1,129 と重なり、run 間の熱/cache ドリフトを分離できていない。**この 4 run では採用判断しない。**
+- 全 run で最初の token は 182416。logit は base 27.2587242、dot 27.2549171 と差がある（SIMD コード生成による数値差。hash が変わるため、CPU variant の採用時も基準 hash の再凍結が必要）。
+- ハーネス自体は成立（variant の実体を sha256 で確認、同一セッション近接、swap 記録）。次は `test-backend-ops perf` 相当の IQ2_XXS マイクロベンチか、反復回数を増やした A/B/B/A/A/B/B/A で判断する。
+
+## §6 端末・ゲート状態（02:40）
+
+- 02:21〜02:40 の間、別プロジェクト c61（`llama.cpp-c51` の 27B e2e）がゲートを使用。こちらの `gate with` は待機後に実行された（キューとして機能）。
+- 端末: uptime 1 時間 48 分（00:32 の再起動後、追加再起動なし）、MemAvailable 11.5 GB（run 前）、`/data` 空き 7.1 GB、残存 probe なし。
+- 変更はコミット `4af0c62f1`（ハーネス初版）に続き、本追記と LF 修正を追加コミットする。
