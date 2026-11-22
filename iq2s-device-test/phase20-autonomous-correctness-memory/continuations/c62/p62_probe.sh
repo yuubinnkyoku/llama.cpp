@@ -10,7 +10,7 @@
 # never reported as passing on a part of its life.
 set -u
 BASE=/data/local/tmp/c61-inkling2
-L=$BASE/libs
+L=${LIBDIR:-$BASE/libs}
 M=$BASE/models/Inkling-2-Mini-AD-IQ2_XXS.gguf
 ID=${1:-p1}
 STEPS=${2:-32}
