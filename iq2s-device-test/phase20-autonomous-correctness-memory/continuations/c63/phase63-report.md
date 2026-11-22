@@ -1,0 +1,63 @@
+# Phase 63 - decode 内訳の測定と、専門家 HTP 配置の再検討
+
+## §0 要点
+
+1. **decode は CPU 律速。** split timing（`GGML_SCHED_SPLIT_TIMING=1`）で 11 decode graph を測ると、1 graph あたり CPU が 1.635 s（compute 1.484 s、sync 0.150 s）、HTP は enqueue の 16 ms だけだった。splits は 326 CPU + 326 HTP。
+2. **専門家 matmul は HTP ではなく CPU で動いている。** scheduler は op を「重みテンソルの backend」に割り当てる。expert テンソルは loader の判定で CPU_Mapped（mmap）に落ちているため、gate/up（IQ2_XXS）も down（IQ4_NL）も CPU 実行になる。HTP compute buffer が 25.10 MiB のままなのが、重みコピーが起きていない証拠。
+3. **専門家を HTP に置く実験で端末が再起動した。** `override-experts-htp.txt` で expert を HTP に強制すると HTP model buffer が **11,363 MiB** まで育ち、その直後に端末がハングして再起動（16:11 JST、boot_id 更新、uptime リセット）。load は完走していない（`PHASE load_end` なし）。再試行しない。
+4. **Phase 63 の主目標（IQ2_XXS MUL_MAT_ID の HTP カーネル）は単独では効かない。** カーネルを足しても、重みが HTP メモリに無い限り op は CPU に割り当てられる。重みを HTP に置くには約 11.4 GB の rpcmem が必要で、この端末では再起動を招く。
+
+## §1 split timing の実測
+
+条件: `FA_SELECT=1`、`DMA64=0`、`SMALLMM=0`、ctx 512、5-token prompt、16 step 指定。開始時 MemAvailable 10.56 GB。
+
+**この run は swap 増分 1.59 GiB（417,268 pages）で 1.5 GiB を超え、step 11 で guard 停止した。比較用の性能値としては無効。** 以下の内訳は「どこに時間が行くか」の attribution としてのみ使う。
+
+| 項目 | 値 |
+| --- | --- |
+| 解析できた graph | prefill 1 + decode 11 |
+| splits / graph | 326 CPU + 326 HTP = 652 |
+| CPU host 時間 / graph | **1.635 s**（compute 1.484 s、sync 0.150 s、copy 0.001 s） |
+| HTP host 時間 / graph | 0.016 s（enqueue のみ、device 時間は非同期で重なる） |
+| prefill 5 token | 3.40 s（1.47 t/s、cache 冷） |
+| decode step | 0.81〜3.89 s（IO 8.4 GB の step を含む） |
+| 上位 CPU split | id 0（178 nodes）97 ms/graph、13-node の MoE ブロックが 40〜65 ms/graph で約 20 個 |
+| HTP compute buffer | 25.10 MiB（graph 予約時） |
+
+13-node の CPU split は MoE ブロック（routing + gate/up 専門家 matmul）に相当し、48 visit 分が CPU 時間の大半を占める。HTP の attention は非同期で重なっており、wall への寄与は小さい。
+
+## §2 なぜ専門家が CPU に残るか
+
+1. `llama_model_loader::select_weight_buft` が `weight_buft_supported` で MUL_MAT_ID を HTP に置けるか判定する。expert 重みは IQ2_XXS / IQ4_NL で、次の理由で CPU に落ちる。
+   - `ggml_hexagon_supported_mul_mat_id` の型リストに **IQ2_XXS が無い**（IQ2 系は ID カーネルが無い）。
+   - ダミー op は 512 token（`n_expert_used=8` で 4,096 行）で VTCM を計算するため、どの expert 型でも VTCM 超過で false になる。
+2. `ggml_backend_sched` は op の backend を、その weight 入力の backend から伝播させる。重みが CPU_Mapped なので MUL_MAT_ID も CPU に確定する。
+3. したがって `sched` の「使用 expert だけコピーする」経路（`ggml-backend.cpp` の MUL_MAT_ID 分岐）は発動しない。HTP は attention（HVX FA）と dense 部だけを担当している。
+
+Phase 62 の §0/§10.1 に「down 専門家（IQ4_NL）は HTP」と書いたが、これは誤り。**両方 CPU** が正しい。本節で訂正する。
+
+## §3 端末再起動の記録（memtest1）
+
+- 目的: expert を HTP に置いたときのメモリ収支を、graph を走らせずに測る。
+- 方法: `LOAD_ONLY=1`（P27 resume で load 後に停止）+ `OVERRIDE=override-experts-htp.txt`（`blk.N.ffn_gate_up_exps.weight` と `ffn_down_exps.weight` を HTP へ）。
+- 開始: MemAvailable 10.47 GB、MemFree 1.36 GB、pswpout 204,634,316。
+- 経過: stderr に `HTP0:0 model buffer size = 11363.11 MiB`。`PHASE load_end` は出ず、ログは途中で切れた。
+- 結果: 16:11 JST に端末が再起動（uptime リセット、boot_id `0e601093-357b-4251-b0fe-71b96b8b32ad`）。`/data` のモデル・libs・runs は無事（空き 7.1 GB）。
+- 解釈: 11.4 GB の rpcmem 確保で MemAvailable が約 1 GB を切り、load 中の page cache 圧迫と合わせてシステムが耐えられなかった。**全 expert の HTP 配置はこの端末では行わない。**
+
+再起動後の環境は pre-reboot と比較できない（thermal、page cache、uptime が別）。Phase 62 の数値（gate8 など）は pre-reboot の記録として残し、以後の run は別環境として扱う。
+
+## §4 Phase 63 の進め方（修正案）
+
+Phase 63 の当初計画（IQ2_XXS MUL_MAT_ID カーネル追加）は、重みが HTP に無い限り効果がない。したがって次の順に切り替える。
+
+- **A. 安全な範囲の測定を先に**: 再起動後、Phase 55 方式で背景アプリを整理して MemAvailable 11 GB 級に戻し、現在の gate8 構成で 32-step を 1 回再取得する（post-reboot baseline）。これで環境差を記録する。
+- **B. CPU 側の MoE を速くする（配置を変えない）**: `P44_NTHREADS` を 6 から 8 に上げる、`GGML_HEXAGON_FFN_OFFLOAD` の設定、CPU の MoE カーネル（IQ2_XXS vec_dot）のマルチスレッド効率を確認する。リスクなしで試せる。
+- **C. 部分配置（所有者判断）**: down 専門家（IQ4_NL、約 4.0 GB）だけ HTP に置く。HTP model buffer は約 5.2 GB になり、全配置より現実的。ただし (1) loader の VTCM 判定を IQ4_NL で通す変更、(2) 4 GB の rpcmem 増加を load-only で安全確認、(3) IQ4_NL の MUL_MAT_ID が HTP で CPU 参照と一致することの検証、が必要。
+- **D. IQ2_XXS の ID カーネル**: 重みが CPU のままでは不要。C が成立して gate/up も HTP に置ける見込みが立ったときだけ着手する。
+
+## §5 状態
+
+- 端末: 2026-11-22 16:11 に再起動（事故）。16:18 時点 uptime 6 分、MemAvailable 2.6 GB（起動直後）、`/data` 空き 7.1 GB、モデル・libs は無事。
+- ブランチ `codex/c61-inkling2`、c63 の report と probe 更新を追加予定。
+- Phase 62 の gate8（32-step、709.6 ms/step、swap 0.605 GiB）は pre-reboot の記録。post-reboot では再測定が必要。

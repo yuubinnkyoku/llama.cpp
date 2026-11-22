@@ -13,7 +13,7 @@
 | crash / 再起動 | なし |
 | swap guard（1.5 GiB） | **0.60 GiB**（158,532 pages）で超過なし |
 | MemAvailable（2.8 GB 中止線） | 11.0〜11.25 GB で余裕 |
-| MUL_MAT_ID | down 専門家（IQ4_NL）は HTP。gate/up（IQ2_XXS）は HTP カーネルが無く CPU |
+| MUL_MAT_ID | 両方 CPU。scheduler は op を重みの backend に割り当て、expert 重みは loader 判定で CPU_Mapped のため（Phase 63 で訂正） |
 
 確定した run 条件（`gate8`）:
 
@@ -131,7 +131,7 @@ if (!use_dma && (extended(src0) || extended(dst))) return NO_SUPPORT;
 ## §7 残作業（次 Phase）
 
 1. **HMX flash attention カーネルの修正**（bit-exact 必須）。HVX が正しいので、HMX の mask/sinks/チャンク計算を HVX と比較して切り分ける。直れば decode はさらに速くなる。
-2. **IQ2_XXS の MUL_MAT_ID カーネル**。現状 IQ2 系は `hvx_mm_init_vec_dot` に vec_dot が無く、gate/up 専門家は CPU。HTP 化できれば expert streaming が半分になる。
+2. **IQ2_XXS の MUL_MAT_ID カーネル**。現状 IQ2 系は `hvx_mm_init_vec_dot` に vec_dot が無く、gate/up 専門家は CPU。ただし Phase 63 で、重みが CPU のままではカーネルを足しても op が CPU に割り当てられると判明（c63 report 参照）。
 3. PAD の extended mapping 対応（DMA64=0 を外せる）。
 4. CONT 3D / F32 3D MUL_MAT の host guard を外せるかの再確認（mix() の HTP 化）。
 5. 27B との同一条件比較、AD-IQ2_S / Q8_0 の品質比較（今回は未実施）。

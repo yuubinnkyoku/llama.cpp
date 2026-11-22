@@ -36,6 +36,7 @@ export GGML_HEXAGON_OPBATCH=${OPBATCH:-1280}
 export GGML_HEXAGON_OPQUEUE=${OPQUEUE:-32}
 export GGML_HEXAGON_DMA64=${DMA64:-1}
 export GGML_HEXAGON_FA_SELECT=${FA_SELECT:-2}
+export GGML_SCHED_SPLIT_TIMING=${SPLIT_TIMING:-0}
 export GGML_HEXAGON_VERBOSE=${VERBOSE:-0}
 export GGML_HEXAGON_2D_ONLY=${HEX2D:-0}
 export GGML_HEXAGON_SMALL_MM_CPU=${SMALLMM:-0}
@@ -67,6 +68,36 @@ fi
 } > "$R/manifest.txt"
 START_SWAP=$(awk '/^pswpout /{print $2}' /proc/vmstat)
 echo "$START_SWAP" > "$R/start_swap.txt"
+
+# Probe only up to the post-load halt: measures the memory a weight placement
+# costs without running a graph. The model is freed by the probe on exit.
+if [ "${LOAD_ONLY:-0}" = "1" ]; then
+    export P27_RESUME_FILE=$R/resume.txt
+    rm -f "$R/resume.txt"
+    timeout -k 10 -s TERM 300 $L/decode-probe $M $BASE/${OVERRIDE:-override-inkling.txt} $STEPS $R/logits.f32 mmap $DEV $NGL \
+        > "$R/stdout.txt" 2> "$R/stderr.txt" &
+    PID=$!
+    n=0
+    while kill -0 $PID 2>/dev/null; do
+        if grep -q "warm_wait_begin" "$R/stdout.txt" 2>/dev/null; then break; fi
+        n=$((n + 1))
+        [ $n -gt 600 ] && break
+        sleep 0.5
+    done
+    sleep 3
+    {
+        echo "--- load_only at $(date)"
+        grep -E '^(MemAvailable|SwapFree|MemFree|Cached):' /proc/meminfo
+        grep -E '^pswpout ' /proc/vmstat
+        grep -a "load_ms" "$R/stdout.txt"
+    } >> "$R/manifest.txt"
+    kill -TERM $PID 2>/dev/null
+    sleep 2
+    kill -KILL $PID 2>/dev/null
+    wait $PID 2>/dev/null
+    echo "RC $?" > "$R/rc.txt"
+    exit 0
+fi
 
 if [ "${TWO_PHASE:-0}" = "1" ]; then
     timeout -k 10 -s TERM $RUN_TIMEOUT \
