@@ -452,13 +452,15 @@ static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_t
         const int32_t * scales_row = &src0.scales[ar * nb_stride + nb_off];
         const int32_t * mins_row = HAS_MIN ? &src0.mins[ar * nb_stride + nb_off] : nullptr;
 
-        // one int32x4 accumulator per src1 column, horizontal sum once at the end
+        // one int32x4 accumulator per src1 column, horizontal sum once at the end.
+        // The min term is a plain scalar: it has no per-lane structure, so a vector
+        // accumulator would be counted 4 times by the horizontal sum.
         int32x4_t acc[TILED_MICRO];
-        int32x4_t acc_min[TILED_MICRO];
+        int32_t acc_min[TILED_MICRO];
         #pragma GCC unroll 16
         for (int j = 0; j < TILED_MICRO; j++) {
             acc[j] = vdupq_n_s32(0);
-            acc_min[j] = vdupq_n_s32(0);
+            acc_min[j] = 0;
         }
 
         for (int s = 0; s < NB; s++) {
@@ -468,7 +470,6 @@ static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_t
                 w[v] = vsubq_s8(vreinterpretq_s8_u8(vld1q_u8(&q0[s * SUBBLK + 16 * v])), bias);
             }
             const int32x4_t scale_v = vdupq_n_s32(scales_row[s]);
-            const int32x4_t mins_v = vdupq_n_s32(mins_row[s]);
             #pragma GCC unroll 16
             for (int j = 0; j < TILED_MICRO; j++) {
                 const int8_t * q1 = &src1.q[(j0 + j) * qk_stride + qk_off + s * SUBBLK];
@@ -485,7 +486,7 @@ static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_t
                     for (int u = 0; u < NS; u++) {
                         bsum += src1.bsums[(bs_off + s * NS + u) * bs_stride + j0 + j];
                     }
-                    acc_min[j] = vmlaq_s32(acc_min[j], vdupq_n_s32(bsum), mins_v);
+                    acc_min[j] += bsum * mins_row[s];
                 }
             }
         }
@@ -495,7 +496,7 @@ static void tiled_run_microtile_neon(const tiled_tile_src0 & src0, const tiled_t
             const int32_t s1 = vaddvq_s32(acc[j]);
             float v = d0 * (float) s1;
             if constexpr (HAS_MIN) {
-                v -= dmin0 * (float) vaddvq_s32(acc_min[j]);
+                v -= dmin0 * (float) acc_min[j];
             }
             buf[ar * buf_stride + j0 + j] += src1.d[seff * TILED_MICRO + j0 + j] * v;
         }

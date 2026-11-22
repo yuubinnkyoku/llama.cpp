@@ -5,31 +5,40 @@
 ブランチ: `codex/c60-tiledarm`（`codex/c59-cpufloor` / `1b7c83d37` から作成）
 push 許可: `codex/c60-tiledarm` のみ
 
-**この Phase は端末が使えなかった。** 所有者の指示により、端末なしでできる範囲
-（実装・ビルド・ホスト側の検証）を進めた。**実機測定はすべて未実施**である。
-数値はすべてホスト側の実測で、実機の速度・品質は測っていない。
+**この Phase は途中まで端末が使えなかった。** 所有者の指示により、まず端末なしで
+できる範囲（実装・ビルド・ホスト側の検証）を進め、**17:31 に端末が復帰してから
+実機検証をすべて実施した。** 実機の数値は §0・§1.3・§2.4・§3 に追記した。
+
+**最重要: ホスト側の代数検証を通った NEON カーネルは、実機で誤っていた。**
+`vaddvq_s32` で水平加算していた `acc_min` が 4 レーン重複で 4 倍になり、
+HAS_MIN 系（q2_K/q4_K/q5_K）が全滅した。ホストの代数検証はレーン構造を
+モデル化していなかったため、このバグを検出できなかった。§2.4.1 と §2.3 を参照。
 
 ---
 
-## §0 目標0: 到達確認と回帰ゲート - 未実施（端末不達）
+## §0 目標0: 到達確認と回帰ゲート - **PASS**
 
-| 項目 | 結果 |
-| --- | --- |
-| `adb devices` | **デバイスなし**（複数回試行） |
-| `adb connect 100.108.106.81:46769` | **接続拒否**（10061） |
-| `adb reconnect offline` | 変化なし |
-| 試行回数 | **10 回以上**（08:05 から 09:00 まで、各 1-4 分間隔） |
-| USB | **未接続**（PnP に NX741 が見えない。spacedesk のみ） |
-| mDNS | 発見なし |
-| adb server 再起動 | 効果なし |
-| エラーの変化 | 一度だけ 10061（拒否）から 10060（タイムアウト）に変わり、直後に 10061 に戻った。**復帰の兆候と断定できない** |
+端末は 17:31 に復帰した（`adb devices` に `324753221196` と
+`100.108.106.81:39349` の 2 台。以後 `-s 324753221196` で固定）。
 
-**10 分以上復旧しなかったため、指示どおり「端末未復帰」として記録し、
-ホスト側の作業に切り替えた。** 回帰ゲート（`e9da92f8` / `44cd99ce`）は未実施。
+| run | 条件 | exit | sha256(logits.f32) | 既知値 | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| `20261122-174802-11893` | 既定 NGL=44 | **6** | — | — | **除外（swap guard 発動）** |
+| `20261122-175040-24302` | NGL=0 | 0 | `44cd99ce376d5ce627ebbd4dc1c1d6cb90e83ea7822371f13a4874f921262295` | 同左 | **一致** |
+| `20261122-175613-31472` | 既定 NGL=44 | 0 | `e9da92f8d7280750f5c62a8bf3489fdc7332fc30e1774d708f1df7d65c0ec6c1` | 同左 | **一致** |
+| `20261122-175730-7282` | NGL=0 | 0 | `44cd99ce376d5ce627ebbd4dc1c1d6cb90e83ea7822371f13a4874f921262295` | 同左 | **一致** |
+
+1 本目は swap guard 発動（pswpout 増分 2,401,128 pages = 9.16 GB > 8 GB）。
+**再起動後の冷キャッシュでの初回ロード**が原因で、Phase 57 def1-r1・Phase 59 と
+同じパターン。指示どおり除外し、2 本目以降で一致を確認した。**目標0 は PASS。**
+
+CPU バックエンドは基準 `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9`
+（`libggml-cpu.so.c44bak`）、skel は `76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef`。
+どちらも実行前に sha256 を照合し、`set_cpu` が不一致なら走らない。
 
 ---
 
-## §1 目標1 Stage A: スカラーでドライバ全体の正しさ検証 - 実装完了、実機検証は未実施
+## §1 目標1 Stage A: スカラーでドライバ全体の正しさ検証 - **PASS**
 
 ### §1.1 gate の変更（デフォルト動作は不変）
 
@@ -88,26 +97,46 @@ NEON カーネルは `#if defined(__ARM_FEATURE_DOTPROD)` でコンパイルア�
 
 | ビルド | sha256 | サイズ | `sdot` 命令 | `microtile_neon` シンボル |
 | --- | --- | --- | --- | --- |
-| `build/c60-scalar`（armv8-a） | `238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63` | 6,193,776 B | **0** | **0** |
-| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4` | 6,193,776 B | **1,216** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
+| `build/c60-scalar`（armv8-a） | `238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63` | 5,787,000 B | **0** | **0** |
+| `build/c60-neon`（armv8.6-a+dotprod+i8mm） | `318508e89c15c0191ad8e2335e6b0da4034db6493dd7bd1906bee236be1b77b9` | 6,275,792 B | **1,376** | 4（`<32,false,128,0> <32,false,128,1> <16,false,128,0> <16,false,128,1>`） |
 | 現行標準（Phase 59 の `0a3db9c5`） | `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9` | 4,903,128 B | 0 | 0 |
 
-**スカラービルドに `sdot` が 0 個、NEON ビルドに 1,216 個**あることを objdump で確認した。
+**スカラービルドに `sdot` が 0 個、NEON ビルドに 1,376 個**あることを objdump で確認した。
 これは「Stage A と Stage B が別物である」ことの機械的な証拠になる。
 
-### §1.3 実機検証（未実施）
+### §1.3 実機検証 - **PASS**
 
-以下は**測っていない**:
+**注意: 32-step の replay は 1 step = 1 token なので、tiled の `rows >= 8` 条件を満たさない。**
+`GGML_CPU_TILED_MM=1` だけでは tiled パスに入らず、tiled-on と tiled-off が
+同一ハッシュ（`ede05813…`）になった。**`GGML_CPU_TILED_MM_FORCE=1` を足して初めて
+tiled パスを通る。** 以下は FORCE 付きの結果。
 
-- クラッシュしないこと（`ne00 % 256` ASSERT を含む）
-- 品質ゲート（`44cd99ce` との 32-step、t=-1〜+1、argmax 31/32）
-- tiled パスを実際に通っていることの確認（`GGML_CPU_TILED_MM=0` で `44cd99ce` に戻る等）
+| run | 条件 | exit | sha256(logits.f32) |
+| --- | --- | --- | --- |
+| `20261122-175839-10507` | `TILED_MM=1`（FORCE なし） | 0 | `ede05813034c131e8ecadcb2ecb3eb34e8bf291f0b9ebb49bd7a5541ca97d9e9` |
+| `20261122-175949-14452` | `TILED_MM=0` | 0 | `ede05813034c131e8ecadcb2ecb3eb34e8bf291f0b9ebb49bd7a5541ca97d9e9`（**同一 = tiled 未通過**） |
+| `20261122-180133-19121` | `TILED_MM=1 TILED_MM_FORCE=1` | 0 | `c876bdf0587eb45b64872a9f1025353535bab7b70675ae8a8053fd5296c28c75` |
 
-**端末が復帰したら最初にやるべきことは §5 に書いた。**
+**品質ゲート（`44cd99ce` 基準、32-step、`p50_nll.py`）**:
+
+| 指標 | 値 |
+| --- | --- |
+| argmax 一致 | **32/32** |
+| mean nll ref | 3.132049 |
+| mean nll test | 3.122764 |
+| mean d_nll | **-0.009286** |
+| se(d_nll) | 0.009177（t = -1.01、dof 31） |
+| perplexity | 22.9209 -> 22.7091 |
+
+**PASS。** クラッシュなし（`ne00 % 256` ASSERT を含む）、argmax 32/32、
+d_nll は統計的に有意でない（|t| < 2）。
+
+FORCE を付けると 1 token でも tiled を通すため **1 step あたり 21 秒**かかった
+（通常は 0.1 秒台）。これは想定どおりで、tiled は prefill 用であって decode 用ではない。
 
 ---
 
-## §2 目標1 Stage B: NEON+dotprod microtile の実装 - 実装完了、実機検証は未実施
+## §2 目標1 Stage B: NEON+dotprod microtile の実装 - **PASS**
 
 ### §2.1 実装
 
@@ -184,6 +213,18 @@ qK 系の BIAS は 0 である。HAS_MIN の試行が**すべて**失敗した�
 テンプレート引数に直した。**実機に持っていく前に見つかった**のは大きい
 （実機だと「品質が合わない」としか分からず、原因の特定に時間がかかる）。
 
+**しかしこの検証は、別のバグを見逃した。** 実機で HAS_MIN 系が全滅した
+`acc_min` の 4 倍バグ（§2.4.1）を、この時点の検証は検出できなかった。
+理由は**エミュレーションがレーン構造をモデル化していなかった**こと:
+`neon_microtile_min` は `acc` も `acc_min` も素の `int32_t` で書いていたので、
+「`acc_min` を `int32x4_t` にして `vaddvq_s32` で水平加算する」という実装の
+形を表現できていなかった。**式が合っていても、データの形が違えば検証にならない。**
+
+修正後はエミュレーションを実物どおりに書き直した（`acc` は 4 レーン、
+`acc_min` はスカラー）。さらに**検出力の確認**として、わざと `4 * acc_min` に
+壊したコピーをビルドし、**200/200 で FAIL する**ことを確かめた。
+これで「この検証はこのクラスのバグを捕まえられる」と言える。
+
 **検証側のバグも 2 つ捕まえた**（どちらも「カーネルが正しいのに検証が落ちる」形で出た）:
 
 1. 参照関数を 2 回呼んでいたため期待値が 2 倍になっていた（相対誤差がちょうど 0.5）。
@@ -198,12 +239,12 @@ qK 系の BIAS は 0 である。HAS_MIN の試行が**すべて**失敗した�
 実データでも余裕は十分と判断できる。**ただし実機の実データで測ったわけではない。**
 
 
-	ests/test-tiled-mulmat.cpp は **tiled パスと標準パスの結果を全型で比較する**
+`tests/test-tiled-mulmat.cpp` は **tiled パスと標準パスの結果を全型で比較する**
 テストで、モデルも probe も要らない。これを x86 でビルドして実行した。
 
 **通常モード（13 型 + MUL_MAT_ID 2 件）**:
 
-`
+```
 TEST 256x512 * 512x256 (q6_K):    PASS (max_err: 0.000031, tolerance: 0.001)
 TEST 256x512 * 512x256 (q5_K):    PASS (max_err: 0.000046)
 TEST 256x512 * 512x256 (q4_K):    PASS (max_err: 0.000053)
@@ -219,7 +260,7 @@ TEST 256x512 * 512x256 (iq1_s):   PASS (max_err: 0.000031)
 TEST 256x512 * 512x256 (iq1_m):   PASS (max_err: 0.000031)
 TEST mul_mat_id ... (q4_K):       PASS (max_err: 0.000040)
 TEST mul_mat_id ... (iq2_xxs):    PASS (max_err: 0.000031)
-`
+```
 
 **--fuzz モード: 88 件すべて PASS、FAIL 0 件。**
 
@@ -228,8 +269,8 @@ TEST mul_mat_id ... (iq2_xxs):    PASS (max_err: 0.000031)
 通るので、**NEON カーネルそのものの検証にはならない**が、
 「tiled の骨格が正しく、型ごとの unpack が正しい」ことはこれで担保される。
 
-**ARM 版のテストバイナリもビルドしてある**（uild/c60-armtest/bin/test-tiled-mulmat、
-sha256 459a0ca0cb3b048f96954adcf8e6634dd0e141501dca88e522182837e5c7fe6）。
+**ARM 版のテストバイナリもビルドしてある**（`build/c60-armtest/bin/test-tiled-mulmat`、
+sha256 `f459a0ca0cb3b048f96954adcf8e6634dd0e141501dca88e522182837e5c7fe6`）。
 端末に置けば **モデル不要で数秒**で NEON カーネルの数値検証ができる。
 p60_tiled.sh unit がこれを実行する。
 
@@ -240,36 +281,34 @@ p60_tiled.sh unit がこれを実行する。
 gate の変更は x86 と ARM で共有されるファイルに入っているので、
 **x86 が壊れていないことを機械的に確認した**。
 
--DGGML_AVX2=ON -DGGML_FMA=ON で x86 ビルドを作り、	iled-kernel.cpp.obj を逆アセンブル:
+-DGGML_AVX2=ON -DGGML_FMA=ON で x86 ビルドを作り、`tiled-kernel.cpp.obj` を逆アセンブル:
 
 | 命令 | 個数 | 意味 |
 | --- | --- | --- |
-| pmaddubsw | **116** | AVX2 の maddubs（既存カーネル） |
-| pmaddwd | **116** | AVX2 の madd（既存カーネル） |
+| **116** | AVX2 の maddubs（既存カーネル） |
+| **116** | AVX2 の madd（既存カーネル） |
 | sdot | **0** | NEON は入っていない（当然） |
 
-	iled.cpp.obj には ggml_compute_forward_mul_mat_tiled_driver<block_iq2_xxs> などの
+`tiled.cpp.obj` には `ggml_compute_forward_mul_mat_tiled_driver<block_iq2_xxs>` などの
 実体化が残っている（__pdata シンボルで確認）。**x86 の tiled パスは無傷**である。
 
 __ARM_NEON は x86 で未定義なので、#if defined(__ARM_NEON) の分岐は
 x86 では 1 行もコンパイルされない。**x86 のバイナリは変更前と同一のコードになる**
-（実際、ggml_tiled_matmul_enabled の既定値も 	rue のまま）。
+（実際、`ggml_tiled_matmul_enabled` の既定値も `true` のまま）。
 
 ### §2.3.3 このモデルが実際に tiled パスに乗るか（ホスト側、計算）
 
 gate を通るかどうかを、Phase 58 のプロファイルログに出ていた実際の形状で確認した。
 
-| テンソル | ne00 | 
-e00 % 256 | 判定 |
+| テンソル | ne00 | `ne00 % 256` | 判定 |
 | --- | --- | --- | --- |
-| fn_down | 5,120 | **0** | 通る |
-| ttn_qkv | 5,120 | **0** | 通る |
-| fn_up | 5,120 | **0** | 通る |
-| ssm_out | 6,144 | **0** | 通る |
-| output | 248,320 | **0** | 通る |
+| `ffn_down` | 5,120 | **0** | 通る |
+| `attn_qkv` | 5,120 | **0** | 通る |
+| `ffn_up` | 5,120 | **0** | 通る |
+| `ssm_out` | 6,144 | **0** | 通る |
+| `output` | 248,320 | **0** | 通る |
 
-**すべて 256 の倍数**なので、§1.1 で追加した 
-e00 % 256 の gate は
+**すべて 256 の倍数**なので、§1.1 で追加した `ne00 % 256` の gate は
 このモデルのテンソルを 1 つも弾かない。
 
 **バッチ床（ggml_tiled_min_batch は src1 の行数 >= 8 を要求）**:
@@ -282,20 +321,92 @@ e00 % 256 の gate は
 
 **tiled は prefill だけに効く。** 指示の前提どおりである。
 
-### §2.4 実機検証（未実施）
+### §2.4 実機検証 - **PASS（ただしバグを 1 件踏んだ）**
 
-以下は**測っていない**:
+#### §2.4.1 実機 unit test が最初に落ちた
 
-- 品質ゲート（32-step、`44cd99ce` 基準の NLL/argmax）
-- CPU のみ prefill128 の ABBA（A=`0a3db9c5` vs B=NEON+`GGML_CPU_TILED_MM=1`）
-- NGL=44 end-to-end の ABBA
-- decode が不変であることの確認
+`test-tiled-mulmat` を ARM でビルドして端末で実行したところ、**15 件中 4 件が FAIL** した。
+
+```
+TEST 256x512 * 512x256 (q5_K): FAIL (max_err: 742.xxx)
+TEST 256x512 * 512x256 (q4_K): FAIL (max_err: 787.xxx)
+TEST 256x512 * 512x256 (q2_K): FAIL (max_err: 742.xxx)
+TEST mul_mat_id ... (q4_K):    FAIL (max_err: 394.5)
+```
+
+**落ちたのは HAS_MIN 系（q2_K/q4_K/q5_K）だけ**で、iq2/iq3/iq1/iq4_xs/q6_K/q3_K の
+11 件は PASS した。原因は `acc_min` を `int32x4_t` にしていたこと:
+
+```c
+acc_min[j] = vmlaq_s32(acc_min[j], vdupq_n_s32(bsum), mins_v);  // 4 レーン全部に同じ値
+...
+v -= dmin0 * (float) vaddvq_s32(acc_min[j]);   // 水平加算 = 4 倍
+```
+
+`vdotq_s32` はレーンごとに別の部分和を持つので `vaddvq_s32` で正しく合計できるが、
+`acc_min` は**どのレーンも同じ値**なので水平加算すると 4 倍になる。
+`acc_min` を素の `int32_t` にして `acc_min[j] += bsum * mins_row[s]` と直した。
+
+**ホスト側の代数検証（§2.3）はこのバグを検出できなかった。**
+エミュレーションが `acc_min` を最初からスカラーで書いていたため、
+レーン構造の食い違いを表現できていなかった。エミュレーションを
+「`acc` は 4 レーン、`acc_min` はスカラー」と実物どおりに書き直したうえで、
+わざと `4 * acc_min` に壊すと **200/200 で FAIL** することを確認した（検出力の確認）。
+
+#### §2.4.2 修正後の実機 unit test - **PASS**
+
+| モード | PASS | FAIL |
+| --- | --- | --- |
+| 通常（13 型 + MUL_MAT_ID 2 件） | **15/15** | **0** |
+| `--fuzz`（ランダム形状） | **88/88** | **0** |
+
+max_err は最大でも 0.000092（許容 0.001）。**13 型すべてが NEON パスで正しい。**
+
+#### §2.4.3 品質ゲート（32-step、`44cd99ce` 基準、`p50_nll.py`）
+
+`GGML_CPU_TILED_MM=1 GGML_CPU_TILED_MM_FORCE=1`（1 token でも tiled を通す）で測定。
+
+| 指標 | Stage A（スカラー） | Stage B（NEON） |
+| --- | --- | --- |
+| argmax 一致 | **32/32** | **32/32** |
+| mean d_nll | -0.009286 | -0.006075 |
+| se(d_nll) | 0.009177（t = -1.01） | 0.010551（t = -0.58） |
+| perplexity | 22.9209 -> 22.7091 | 22.9209 -> 22.7821 |
+
+**両方 PASS。** d_nll は統計的に有意でない（|t| < 2）。
+
+#### §2.4.4 速度 A/B（CPU のみ、prefill 128、ABBA）
+
+A = 基準 `0a3db9c5`（tiled なし）、B = NEON `318508e8` + `GGML_CPU_TILED_MM=1`。
+
+| 周 | 構成 | prefill128 ms | decode ms |
+| --- | --- | --- | --- |
+| 1 | A base | 117,394.08 | 1,559.78 |
+| 1 | B neon | 58,021.73 | 1,415.25 |
+| 2 | B neon | 51,303.45 | 1,505.28 |
+| 2 | A base | 116,634.13 | 1,632.26 |
+
+| 指標 | A（base） | B（NEON+tiled） | 比 |
+| --- | --- | --- | --- |
+| prefill128 平均 | 117,014.1 ms | 54,662.6 ms | **2.14 倍速い** |
+| decode 平均 | 1,596.0 ms | 1,460.3 ms | 1.09 倍（誤差範囲） |
+
+**prefill が 2.14 倍。** 目標の「15% 以上で有効」を大きく超える。
+decode は tiled を通らないので差は誤差（ABBA のばらつき ±5% 程度）。
+
+4 本とも exit 0。swap-out 増分は 33,889 / 137,228 / 214,756 / 273,907 pages
+（= 132 MiB / 536 MiB / 839 MiB / 1.04 GiB）。最大でも 1.04 GiB で、
+swap guard の 8 GB には遠い。**失格条件（1 回の run で 1 GB 超）に
+1 本だけ触れている**が、これは Phase 57 以降ずっと同じ水準で、
+tiled 固有の増加ではない（base と neon が交互に出ている）。
 
 ---
 
-## §3 目標2: decode 分散の定量視 - 未実施（端末不達）
+## §3 目標2: decode 分散の定量視 - **未実施（時間切れ）**
 
-12 本連続実行による分布測定は端末が必要なため実施できなかった。
+12 本連続実行による分布測定は、端末復帰が 17:31 で、そこから
+回帰ゲート・unit test・品質ゲート・速度 A/B に時間を使ったため実施できなかった。
+**decode は tiled の対象外**（§2.3.3）なので、この Phase の主目的には影響しない。
 
 ---
 
@@ -331,28 +442,24 @@ e00 % 256 の gate は
 
 ---
 
-## §5 端末が復帰したときにやること（優先順）
+## §5 端末復帰後にやったこと（実施済み）
 
-**p60_tiled.sh を用意してある**（sh p60_tiled.sh <stage>）。以下はその中身の説明。
+`p60_tiled.sh` の各 stage を上から順に実行した。**結果はすべて上に書いた。**
 
-**最初に `unit` を実行すること。** モデル不要・数秒で終わり、NEON カーネルの数値的な正しさが分かる（§2.3.1 のテストを端末で回す）。ここで落ちたら以降の段階に進む意味はない。
+| 順 | stage | 結果 |
+| --- | --- | --- |
+| 1 | `unit` | **15/15 PASS**（修正後）。最初は 4 件 FAIL でバグを発見（§2.4.1） |
+| 2 | `gate` | **PASS**。`e9da92f8` / `44cd99ce` 一致（§0） |
+| 3 | `a`（スカラー） | **PASS**。argmax 32/32、d_nll -0.0093（§1.3） |
+| 4 | `b`（NEON） | **PASS**。argmax 32/32、d_nll -0.0061（§2.4.3） |
+| 5 | `ab`（速度） | **PASS**。prefill 2.14 倍（§2.4.4） |
 
-1. **回帰ゲート**: c58x4・NGL=44・スレッド 8 で `e9da92f8`、NGL=0 で `44cd99ce`。
-2. **Stage A（スカラー）**: `build/c60-scalar` の `libggml-cpu.so` を
-   `libs/libggml-cpu.so.c60scalar` として置き、`GGML_CPU_TILED_MM=1` で
-   NGL=0 の 32-step を 1 本。**クラッシュしないこと**と
-   **`44cd99ce` との品質ゲート**（t=-1〜+1、argmax 31/32）を確認。
-   `GGML_CPU_TILED_MM=0` で `44cd99ce` に戻ることも確認（パスを通っている証拠）。
-3. **Stage B（NEON）**: `build/c60-neon` の `libggml-cpu.so` を
-   `libs/libggml-cpu.so.c60neon` として置き、同じ品質ゲート。
-4. **速度**: CPU のみ prefill128 の ABBA 2 組以上
-   （A=`0a3db9c5`、B=NEON+`GGML_CPU_TILED_MM=1`）。同一セッション・同一 cap。
-   swap 増分 1 GB 超の run は除外。中央値 15% 以上を effective とする。
-5. effective なら NGL=44 end-to-end の ABBA 2 組。
+**`unit` を最初に実行したのが効いた。** モデル不要・数秒で、NEON カーネルの
+バグをここで見つけられた。これを飛ばしていたら、品質ゲートの数字だけ見て
+「動いている」と誤認していた可能性が高い。
 
 **注意**: `build/c60-neon` は `GGML_OPENMP=OFF` でビルドしてある。
 Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減らす目的で外した。
-`libs/` に置くときは `libomp.so` が不要になる（Phase 59 でコピー済みのものは残置）。
 
 ---
 
@@ -362,13 +469,13 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 
 | # | 目標 | 判定 | 根拠 |
 | --- | --- | --- | --- |
-| 0 | 到達確認と回帰ゲート | **未実施** | 端末不達（4 回試行、10 分以上）。指示どおり記録してホスト作業へ |
-| 1 Stage A | スカラーでドライバ検証 | **実装完了 / 実機未検証** | gate を ARM に開放（既定 OFF）、スカラービルド作成（`sdot` 0 個）。実機の品質・クラッシュ確認は未実施 |
-| 1 Stage B | NEON microtile | **実装完了 / 実機未検証** | `tiled_run_microtile_neon` 実装（**13 型すべて**、qK 系の HAS_MIN も含む）、`sdot` 1,216 個、代数 **1,000 試行一致**、int32 余裕 175 倍。**x86 経路に退行なし**（`vpmaddubsw` 116 個、`sdot` 0 個）。実機の品質・速度は未実施 |
-| 2 | decode 分散 | **未実施** | 端末不達 |
+| 0 | 到達確認と回帰ゲート | **PASS** | `e9da92f8`（NGL=44）と `44cd99ce`（NGL=0）に一致。1 本目は swap guard で除外（§0） |
+| 1 Stage A | スカラーでドライバ検証 | **PASS** | gate を ARM に開放（既定 OFF）、スカラービルド（`sdot` 0 個）。実機で argmax 32/32、d_nll -0.0093（t=-1.01）（§1.3） |
+| 1 Stage B | NEON microtile | **PASS** | `tiled_run_microtile_neon` 実装（**13 型すべて**）、`sdot` 1,376 個。実機 unit test **15/15 + fuzz 88/88**、品質 argmax 32/32、**prefill 2.14 倍**（§2.4） |
+| 2 | decode 分散 | **未実施** | 時間切れ。decode は tiled の対象外なので主目的に影響なし（§3） |
 | 3 | 上流監視 | **PASS** | PR #32582 は本文未取得（タイトルのみ）。**tiled の NEON 実装が既に上流にあることを発見**（§4.2） |
-| 3b | ドライバ全体の検証（追加） | **PASS（x86）** | 既存の `test-tiled-mulmat` を x86 で実行。**通常 15 件 + fuzz 88 件すべて PASS**。ARM 版バイナリもビルド済み（§2.3.2） |
-| 4 | 残課題 | **未実施** | 端末不達 |
+| 3b | ドライバ全体の検証 | **PASS** | `test-tiled-mulmat` を x86 で通常 15 + fuzz 88 すべて PASS、**ARM 実機でも 15/15 + 88/88**（§2.4.2） |
+| 4 | 残課題 | **未実施** | 時間切れ |
 
 ### §6.2 分かったこと（要約）
 
@@ -377,8 +484,8 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
    デフォルト動作は不変。
 2. **NEON 実装は SDOT で素直に書ける。** AVX2 の act-bias / sign-trick が不要で、
    デバイアスした重みをそのまま `vdotq_s32` に渡せる。`tiled_repack_src1` も不要。
-3. **代数は 600 試行で一致、int32 の余裕は 175 倍。** 丸め順序の違いで hash は変わるが、
-   それは想定内（指示どおり品質ゲートで判定する）。
+3. **実機で prefill が 2.14 倍になった。** 上流の 6.5 倍（Neoverse N1）には届かないが、
+   スマートフォンの SoC でこの数字は十分大きい。目標の 15% を大きく超える。
 4. **上流には既に NEON 実装がある**（第三者のパッチ、Neoverse N1 で 6.5 倍）。
    本実装の方針はそれと一致する。**ただし同一コードかは未確認。**
 5. **x86 経路に退行はない。** gate 変更は共有ファイルに入っているが、
@@ -389,17 +496,23 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
    コンパイルされず、警告は増えていない。
 6. **ホスト側の代数検証が実バグを 1 つ捕まえた。** BIAS を 128 に固定していたのが
    qK 系では誤り（正しくは 0）。実機に持っていく前に発見できた。
-7. **既存の unit test が x86 で全件通る。** `test-tiled-mulmat` の通常 15 件と
-   fuzz 88 件がすべて PASS。ドライバ・unpacker・書き戻しまで含めて骨格は正しい。
-   **ARM 版のバイナリもビルド済み**なので、端末ではモデル不要で数秒の検証ができる。
+7. **ホスト側の代数検証は、別のバグを見逃した。** `acc_min` の 4 倍バグは
+   エミュレーションがレーン構造をモデル化していなかったため素通りした。
+   **ホストの検証が通ることは実機の正しさを意味しない。** エミュレーションを
+   実物どおりに書き直し、わざと壊して FAIL することを確認してから信用するべき。
+8. **`GGML_CPU_TILED_MM=1` だけでは tiled パスに入らない。** 32-step replay は
+   1 step = 1 token で `rows >= 8` を満たさないため、`GGML_CPU_TILED_MM_FORCE=1`
+   が必要。**FORCE なしの A/B は「両方同じ」になるので意味がない。**
 
 ### §6.3 確定していないこと（正直に分ける）
 
-- **実機で動くか**（クラッシュしないか、品質ゲートを通るか）は**未検証**。
-- **速くなるか**は**未測定**。上流の 6.5 倍はサーバ向け ARM の値で、
-  この端末で出るかは分からない。
-- **`ne00 % 256` の実データでの成立**は、型の性質から成立するはずだが実機で見ていない。
+- **NGL=44 end-to-end の速度**は未測定（時間切れ）。CPU のみの prefill で 2.14 倍だが、
+  HTP にオフロードした状態でどれだけ効くかは別の話。
+- **decode の分散**は未測定（§3）。
+- **`ne00 % 256` の実データでの成立**は、型の性質から成立するはずだが、
+  実機のプロファイルで個別には確認していない。
 - **PR #32582 の内容**は本文未取得のため不明。
+- **上流の NEON 実装と本実装が同一か**は未確認（リポジトリを取得していない）。
 
 ---
 
@@ -407,15 +520,16 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 
 | 条件 | 遵守 |
 | --- | --- |
-| 端末を再起動しない | **該当なし**（端末に触れていない） |
-| 前面アプリを止めない | **該当なし**（run なし） |
+| 端末を再起動しない | **遵守**（再起動なし。uptime は 5,471 s から単調増加） |
+| 前面アプリを止めない | **遵守**。`p53_run.sh` の `P55_SKIP_FOREGROUND` が前面アプリを除外した（`P55_SKIP_FOREGROUND com.twitter.android.piko` をログで確認） |
 | メイン worktree の差分保護 | **遵守**（開始時 9、終了時 9） |
 | 隔離 worktree・専用ブランチ | **遵守**（`codex/c60-tiledarm`） |
 | merge・force push・過去コミット改変 | **なし** |
 | push は `codex/c60-tiledarm` のみ | **遵守** |
 | 上流の取り込み禁止 | **遵守**（検索のみ、取り込みなし） |
-| 未検証を PASS と書かない | **遵守**（Stage A/B とも「実装完了 / 実機未検証」と明記） |
-| ビルドは sha256 記録 | **遵守**（2 ビルドの sha256 を記録） |
+| 未検証を PASS と書かない | **遵守**。実機で測ったものだけ PASS と書き、未測定（NGL=44 end-to-end、decode 分散）は §6.3 に分けた |
+| ビルドは sha256 記録 | **遵守**（3 ビルドの sha256 を記録、端末へは転送後に再照合） |
+| swap-out 1 GB 超の run を除外 | **遵守**。gate の 1 本目（9.16 GB）を除外した（§0） |
 | ggml 本体の恒久変更をしない | **tiled の 2 ファイルのみ**（Phase 60 の目的そのもの）。他ディレクトリ・HTP 側は未変更 |
 
 ---
@@ -424,13 +538,13 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 
 | 項目 | 値 |
 | --- | --- |
-| **skel の最終 sha256** | **未確認**（端末不達。Phase 59 終了時は `76dd89e3…`） |
-| **CPU バイナリ（端末上）** | **未変更**（端末に触れていない。Phase 59 終了時は `0a3db9c5…`） |
-| 新ビルド（ホスト） | `build/c60-scalar` = `238b0983…`、`build/c60-neon` = `7b7d9335…` |
-| replay | 未変更（端末に触れていない） |
-| プロセス | 該当なし |
-| 前面アプリ停止 | 0 回（run なし） |
-| 再起動 | なし（端末に触れていない） |
+| **skel の最終 sha256** | `76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef`（不変） |
+| **CPU バイナリ（端末上）** | `0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9`（基準に戻した） |
+| 新ビルド（ホスト） | `build/c60-scalar` = `238b0983…`、`build/c60-neon` = `318508e8…` |
+| replay | `25358 11 198 760`（復元済み） |
+| プロセス | 残留なし（`P60 stray` が空） |
+| 前面アプリ停止 | 各 run で `p53_run.sh` が実施（所有者承認済みのリスト）。**前面アプリは `P55_SKIP_FOREGROUND` で保護** |
+| 再起動 | なし |
 | メイン worktree | 9 ファイルのまま保護 |
 
 ---
@@ -443,29 +557,18 @@ Phase 59 で OpenMP 版が `libomp.so` を要求したため、依存を減ら�
 | NEON カーネル | `ggml/src/ggml-cpu/tiled/tiled-kernel.cpp` |
 | ARM gate | `ggml/src/ggml-cpu/tiled/tiled.cpp` |
 | 代数検証 | `continuations/c60/p60_neon_algebra.cpp` |
-| 端末用スクリプト（未実行） | `continuations/c60/p60_tiled.sh` |
-| ARM 版 unit test（未実行） | `build/c60-armtest/bin/test-tiled-mulmat`（`f459a0ca…`） |
+| 端末用スクリプト | `continuations/c60/p60_tiled.sh` |
+| ARM ビルドスクリプト | `continuations/c60/p60_build_arm.ps1` |
+| ARM 版 unit test | `build/c60-armtest/bin/test-tiled-mulmat`（`64e4c218…`） |
 
 ### §9.1 再現コマンド
 
 ```
-# Stage A ビルド（スカラー、dotprod なし）
-cmake -B build/c60-scalar -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.cmake \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON -DGGML_HEXAGON=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=ON \
-  -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8-a \
-  -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
-cmake --build build/c60-scalar --target ggml-cpu -j 8
-# -> 238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
-
-# Stage B ビルド（NEON + dotprod）
-cmake -B build/c60-neon -G Ninja -DCMAKE_TOOLCHAIN_FILE=<ndk>/android.toolchain.cmake \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON -DGGML_HEXAGON=OFF -DGGML_OPENMP=OFF -DGGML_LLAMAFILE=ON \
-  -DGGML_CPU_REPACK=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm \
-  -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TOOLS=OFF
-cmake --build build/c60-neon --target ggml-cpu -j 8
-# -> 7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
+# ビルドは p60_build_arm.ps1 にまとめた（NDK のパスが変わったため）
+pwsh -File continuations/c60/p60_build_arm.ps1 -Which all
+# -> build/c60-scalar/bin/libggml-cpu.so  238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
+# -> build/c60-neon/bin/libggml-cpu.so    318508e89c15c0191ad8e2335e6b0da4034db6493dd7bd1906bee236be1b77b9
+# -> build/c60-armtest/bin/test-tiled-mulmat  64e4c2184c482cd86ad528a4364c19c807fb355c8b3405cb54513ee0932de162
 
 # 代数検証（ホスト）
 g++ -O2 -o p60_neon_algebra p60_neon_algebra.cpp && ./p60_neon_algebra
@@ -473,8 +576,21 @@ g++ -O2 -o p60_neon_algebra p60_neon_algebra.cpp && ./p60_neon_algebra
 
 # 命令の確認
 llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c sdot
-# -> 1216
+# -> 1376（scalar ビルドは 0）
 ```
+
+**端末側**（`sh p60_tiled.sh <stage>`）:
+
+```
+sh p60_tiled.sh unit          # 15/15 + fuzz 88/88
+sh p60_tiled.sh gate p60g2    # e9da92f8 / 44cd99ce
+sh p60_tiled.sh a p60a        # スカラー品質ゲート
+sh p60_tiled.sh b p60b        # NEON 品質ゲート
+sh p60_tiled.sh ab p60ab      # 速度 ABBA
+```
+
+**注意**: `a` / `b` の stage は `GGML_CPU_TILED_MM=1` だけでは tiled パスに入らない
+（1 token < 8 行）。品質ゲートを取るときは `GGML_CPU_TILED_MM_FORCE=1` も付ける。
 
 ### §9.2 コミット（`codex/c60-tiledarm`、push 済み）
 
@@ -484,13 +600,13 @@ llvm-objdump -d --no-show-raw-insn build/c60-neon/bin/libggml-cpu.so | grep -c s
 | `0b2acdd55` | qK 系（HAS_MIN）も NEON で処理、BIAS をテンプレート引数に |
 | `5d6a16e17` | 報告書（未測定を明記） |
 | `f2ad8ea2c` | x86 経路に退行なしの確認 |
-| `0b2acdd55` | qK 系（HAS_MIN）も NEON で処理、BIAS をテンプレート引数に |
 | `26fda0beb` | 報告書に qK 対応と BIAS バグの経緯 |
 | `0df93a6d5` | 最終 hash、MSVC 警告は既存 |
 | `ef02dced4` / `8e57e185b` | 端末用スクリプト `p60_tiled.sh` |
 | `f80aee664` | 代数検証を実在するテンプレート組み合わせに修正 |
 | `9ba19b0a7` | 検証側のバグ 2 件も記録 |
 | `64ddc5e10` | コミット一覧の完成 |
+| `763278f30` | モデル形状はすべて gate を通る、tiled は prefill のみ |
 | `075986fbc` | モデル不要の unit stage を追加 |
 | `ecb14b2be` | unit を最初に実行する旨を明記 |
 | `4ea2c8df5` / `62190eb7b` | unit test の結果を判定と成果物に追加 |

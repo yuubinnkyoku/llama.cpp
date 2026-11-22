@@ -12,7 +12,7 @@
 #
 # The two new cpu backends must already be on the device:
 #   libs/libggml-cpu.so.c60scalar  238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
-#   libs/libggml-cpu.so.c60neon    7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
+#   libs/libggml-cpu.so.c60neon2   318508e89c15c0191ad8e2335e6b0da4034db6493dd7bd1906bee236be1b77b9
 # and the baseline:
 #   libs/libggml-cpu.so.c44bak     0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9
 set -u
@@ -24,7 +24,7 @@ TIMEOUT=${TIMEOUT:-1800}
 SKEL=76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef
 CPU_BASE=0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9
 CPU_SCALAR=238b09835974b10a45b014289993cc6bec49adda82de4dae77201f69e5173f63
-CPU_NEON=7b7d93358dc2cc3d421953ed5d240b60ae7e4b96657161a174478c3fd89f31a4
+CPU_NEON=318508e89c15c0191ad8e2335e6b0da4034db6493dd7bd1906bee236be1b77b9
 
 cap() { cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null; }
 tz0() { cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null; }
@@ -119,7 +119,7 @@ gate)
     ;;
 a|b)
     if [ "$STAGE" = "a" ]; then set_cpu $L/libggml-cpu.so.c60scalar $CPU_SCALAR || exit 2
-    else                        set_cpu $L/libggml-cpu.so.c60neon   $CPU_NEON   || exit 2; fi
+    else                        set_cpu $L/libggml-cpu.so.c60neon2   $CPU_NEON   || exit 2; fi
     cp $L/replay32.txt $L/replay.txt
     # tiled on, cpu only: this is the correctness checkpoint
     run32 $TAG-$STAGE-tiled 0 "GGML_CPU_TILED_MM=1"
@@ -135,10 +135,10 @@ ab)
         if [ $((P % 2)) -eq 1 ]; then
             set_cpu $L/libggml-cpu.so.c44bak $CPU_BASE || exit 2
             run128 $TAG-p$P-1-base 0 ""
-            set_cpu $L/libggml-cpu.so.c60neon $CPU_NEON || exit 2
+            set_cpu $L/libggml-cpu.so.c60neon2 $CPU_NEON || exit 2
             run128 $TAG-p$P-2-neon 0 "GGML_CPU_TILED_MM=1"
         else
-            set_cpu $L/libggml-cpu.so.c60neon $CPU_NEON || exit 2
+            set_cpu $L/libggml-cpu.so.c60neon2 $CPU_NEON || exit 2
             run128 $TAG-p$P-1-neon 0 "GGML_CPU_TILED_MM=1"
             set_cpu $L/libggml-cpu.so.c44bak $CPU_BASE || exit 2
             run128 $TAG-p$P-2-base 0 ""

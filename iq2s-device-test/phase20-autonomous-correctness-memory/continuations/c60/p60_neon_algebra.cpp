@@ -211,24 +211,38 @@ static void ref_microtile_min(int SUBBLK, int BIASV, const uint8_t * q0, const i
     }
 }
 
+// Models the NEON lane structure, not just the arithmetic: acc[j] is an int32x4 whose
+// lanes are summed by vaddvq_s32, while the min term is a plain scalar. A vector
+// accumulator for the min term would be counted 4 times by the horizontal sum, so the
+// emulation has to keep the two shapes apart to be able to catch that.
 static void neon_microtile_min(int SUBBLK, int BIASV, const uint8_t * q0, const int8_t * q1,
                                const int32_t * scales, const int32_t * mins,
                                const float * d0, const float * dmin, const float * d1,
                                float * buf, int buf_stride) {
     const int NB = TILE_K / SUBBLK;
     const int NS = SUBBLK / 16;
+    const int NV = SUBBLK / 16;
 
     for (int i = 0; i < MICRO; i++) {
-        int32_t acc[MICRO], acc_min[MICRO];
-        for (int j = 0; j < MICRO; j++) { acc[j] = 0; acc_min[j] = 0; }
+        int32_t acc[MICRO][4], acc_min[MICRO];
+        for (int j = 0; j < MICRO; j++) {
+            for (int l = 0; l < 4; l++) acc[j][l] = 0;
+            acc_min[j] = 0;
+        }
         for (int s = 0; s < NB; s++) {
             for (int j = 0; j < MICRO; j++) {
-                int32_t d = 0;
-                for (int e = 0; e < SUBBLK; e++) {
-                    const int32_t w = (int32_t) q0[i * TILE_K + s * SUBBLK + e] - BIAS_QK;
-                    d += w * (int32_t) q1[j * TILE_K + s * SUBBLK + e];
+                // vdotq_s32: lane l takes byte 4l..4l+3 of each 16-byte vector
+                int32_t d[4] = { 0, 0, 0, 0 };
+                for (int v = 0; v < NV; v++) {
+                    for (int l = 0; l < 4; l++) {
+                        for (int e = 4 * l; e < 4 * l + 4; e++) {
+                            const int32_t w = (int32_t) q0[i * TILE_K + s * SUBBLK + 16 * v + e] - BIAS_QK;
+                            d[l] += w * (int32_t) q1[j * TILE_K + s * SUBBLK + 16 * v + e];
+                        }
+                    }
                 }
-                acc[j] += d * scales[i * NB + s];
+                for (int l = 0; l < 4; l++) acc[j][l] += d[l] * scales[i * NB + s];
+
                 int32_t bsum = 0;
                 for (int u = 0; u < NS; u++) {
                     int32_t t = 0;
@@ -239,7 +253,9 @@ static void neon_microtile_min(int SUBBLK, int BIASV, const uint8_t * q0, const 
             }
         }
         for (int j = 0; j < MICRO; j++) {
-            float v = d0[i] * (float) acc[j] - dmin[i] * (float) acc_min[j];
+            // vaddvq_s32(acc[j]) then the scalar min term
+            const int32_t s1 = acc[j][0] + acc[j][1] + acc[j][2] + acc[j][3];
+            float v = d0[i] * (float) s1 - dmin[i] * (float) acc_min[j];
             buf[i * buf_stride + j] += d1[j] * v;
         }
     }
