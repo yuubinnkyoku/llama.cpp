@@ -43,3 +43,32 @@
 
 - 端末: uptime 7 時間 55 分（16:11 の再起動後、追加の再起動なし）。孤児 kill 後 MemAvailable 10.6 GB、`/data` 空き 7.1 GB。
 - ブランチ `codex/c61-inkling2`: 本 report と probe の監視 1 秒化を追加して push する。
+
+## §6 追加結果（2026-11-23 00:30）: 8-token cap と最終 A/B
+
+### 6.1 8-token cap で既定配置が通った
+
+配置 probe の cap を 32 → 8 token に変更した（libggml-hexagon.so sha256 `c87765f76821cc891a4937f5391a422d3158147ade8f9a2eefc4a0b3f1c2c1f9`）。既定の `override-inkling.txt` のままでも down が HTP に載り、HTP model buffer は **5,348.86 MiB**（23 層。layer 0 は NGL=48 で CPU 割当のため対象外）。明示 override（24 層）は 5,531.11 MiB。
+
+### 6.2 最終 A/B（NUB=8、32 step、同一セッション近接）
+
+| 項目 | down CPU | down HTP 24 層 | down HTP 既定 23 層 |
+| --- | --- | --- | --- |
+| prefill 5 token | 4,955 ms | 2,312 ms | 2,688 ms |
+| decode 32-step 平均 | 919.8 ms/step | **424.1 ms/step** | **493.5 ms/step** |
+| swap 増分 | 0.66 GiB | 0.37 GiB | 0.66 GiB |
+| 最初の token | 182416 | 182416 | 182416 |
+| 出力テキスト | 同一 | 同一 | 同一 |
+
+- **down HTP は decode が 1.9〜2.2 倍速い。** c63 §6.4 の「速くならない」は、down が両方 CPU だった無効な比較による誤り（c63 §9 で訂正）。
+- **bit-exact ではない**: replay hash は down CPU `be30a788...`、down HTP 24 層 `4d89f1cd85e35588cb434b91b356fa88fb449227a891db4daa016a5f3fdcd56f`。§13.C の「CPU 参照と bit 一致」は満たさない。最初の token と 32-step 出力は一致し、logit 差は約 0.03。
+- したがって C は「性能は大きいが bit-exact でない」ため、採用には所有者の判断が必要。bit-exact を維持するなら IQ4_NL ID カーネルの CPU 一致実装（タイル順序の見直し）か、C を見送って M タイル化/CPU 高速化に進む。
+
+### 6.3 D の結論（変更なし）
+
+全 gate/up（24 層）の HTP 配置は 11,363 MiB で不採用（§0）。up 6 層でも 6,989 MiB で、開始 10.5 GB でも残り 3.5 GB。decode 中の churn を考えると実用性は低い。
+
+### 6.4 状態
+
+- 端末: uptime 8 時間 16 分（16:11 再起動後、追加再起動なし）。MemAvailable 10〜12 GB、`/data` 7.1 GB。
+- ブランチ: 本節、c63 §9 訂正、probe の 1 秒監視、c64 override 群を追加して push する。

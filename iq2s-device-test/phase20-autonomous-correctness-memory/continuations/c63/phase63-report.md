@@ -110,3 +110,26 @@ Phase 63 の当初計画（IQ2_XXS MUL_MAT_ID カーネル追加）は、重み�
 - 端末: 16:11 の再起動後、uptime 3 時間 20 分。MemAvailable 10〜11 GB、`/data` 空き 7.1 GB。残存プロセスなし。
 - ブランチ `codex/c61-inkling2`: 本 report、ホスト変更（VTCM probe cap）、override 4 種、probe 更新を追加して push する。
 - 推奨: C の構成（down HTP + NUB=8）を Phase 63 の基準構成にする。decode の改善には D（IQ2_XXS の ID カーネル）が必要だが、gate/up も HTP に置くと HTP model buffer は約 10 GB になり、2026-11-22 の全配置実験（11.4 GB で再起動）と同水準になる。実施には所有者の判断と段階 load テストが必須。
+
+## §9 訂正（2026-11-23 00:30）: §6.1/§6.4 の A/B は無効だった
+
+§6 の A/B は、down 専門家が実際には両方 CPU に載っていた（HTP model buffer 1,157.11 MiB）ため無効である。32-token の配置 probe cap では VTCM が 8 MB を超え、既定配置は失敗していた。5,531.11 MiB の run はすべて明示 override（`override-down-24.txt`）によるものだった。
+
+### 9.1 正しい A/B（明示 override、NUB=8、32 step、同一セッション近接）
+
+| 項目 | down CPU | down HTP（24 層 override） | down HTP（既定 23 層） |
+| --- | --- | --- | --- |
+| HTP model buffer | 1,157.11 MiB | 5,531.11 MiB | 5,348.86 MiB |
+| 最初の token / logit | 182416 / 27.2587242 | 182416 / 27.2261276 | 182416 / 27.2482471 |
+| prefill 5 token | 4,955 ms | 2,312 ms | 2,688 ms |
+| decode 32-step 平均 | 919.8 ms/step | **424.1 ms/step** | **493.5 ms/step** |
+| swap 増分 | 0.66 GiB | 0.37 GiB | 0.66 GiB |
+| 出力 | 同一テキスト | 同一テキスト | 同一テキスト |
+
+- **down HTP は decode が 1.9〜2.2 倍速い**（919.8 → 424.1/493.5 ms/step）。§6.4 の「decode は速くならない」は無効な比較に基づく誤り。
+- **replay hash は一致しない**: down CPU `be30a788...` に対し、down HTP（24 層）は `4d89f1cd85e35588cb434b91b356fa88fb449227a891db4daa016a5f3fdcd56f`。IQ4_NL の HTP カーネルは CPU と bit-exact ではない。§13.C の採用条件（replay hash 一致）は満たさない。
+- 最初の token と 32-step の出力テキストは一致する。数値は近いが bit 一致ではない。
+
+### 9.2 8-token cap で既定配置が通る（c64 の修正）
+
+配置 probe の cap を 32 → **8 token** に変えると、既定の `override-inkling.txt` でも down が HTP に載る（5,348.86 MiB、23 層。layer 0 は NGL=48 で CPU 割当のため対象外）。新しい host lib は sha256 `c87765f76821cc891a4937f5391a422d3158147ade8f9a2eefc4a0b3f1c2c1f9`。
