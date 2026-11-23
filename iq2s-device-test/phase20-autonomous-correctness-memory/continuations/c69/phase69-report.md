@@ -49,3 +49,15 @@
 
 - 本 report（c69）、`c66/validate_canary.sh`、`c66/regress_canary.sh`、`c66/compare_prompts.sh` 等の調査スクリプト。
 - ソース: `matmul-ops.c` の canary 配置修正。診断 host の probe token ノブ。
+
+## §5 追記（02:50）: 採用 A/B は MemAvailable 不足で BLOCKED
+
+prefill 512 / decode の A/B（NUB=8 非タイル vs NUB=32 タイル、`gate with --min-mem 11`）を 2 回試行したが、いずれも GATE_MEM_LOW（76）で開始できなかった。
+
+- 1 回目: 01:48:52 にロック取得、MemAvailable が 10.97 GB までしか戻らず 30 分待機の末 76（last=10,973,912 kB）。
+- 2 回目: 02:20:12 にロック取得、同じく 10.66 GB で 76（last=10,657,852 kB）。
+- 合間に `cleanup.sh`（前面アプリを残す force-stop）で 11.63 GB まで回復したが、その後のアプリ復帰で再び 10.7 GB 前後に低下した。
+- 端末の空きは 10.7〜11.6 GB を推移しており、11 GiB（11,534,336 kB）の測定前提に届く窓が短い。prefill 512 の A/B は warmup 前置でも swap 2.88 GiB 規模のため、測定成立には余裕のあるメモリ窓が必要。
+- 次回: cleanup 直後に `--min-mem 11` の gate を連続投入するか、前面アプリが軽い時間帯に実施する。decode 32-step の A/B は light（swap 1 GiB 未満）なので、メモリ窓が取れ次第まずこちらを実施する。
+
+端末（02:50）: uptime 1 日 1 時間 55 分、追加再起動なし、MemAvailable 10.7 GB、`/data` 空き 5.2 GB、残存プローブなし、gate lock free。
