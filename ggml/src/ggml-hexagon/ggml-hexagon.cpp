@@ -5974,24 +5974,44 @@ static void ggml_hexagon_precompute_hvx_mm_params(
             kparams->kernel_type   = (src1_nrows < (int) sess->n_threads) ? HTP_MM_KERNEL_HVX_QUANT_BLOCK : HTP_MM_KERNEL_HVX_QUANT_ROW;
             kparams->src1_row_size = htp_mm_weight_has_offset(wtype) ? htp_mm_q8_1_tiled_row_size(ne10) : htp_mm_q8_0_tiled_row_size(ne10);
 
-            struct htp_mm_hvx_vtcm_layout L;
-            uint32_t max_prefetch = (src1_nrows > HTP_MM_HMX_MIN_NROWS) ? 2 : 16;
+            // The activation block for all rows may not fit the VTCM. Find the
+            // largest row chunk that does; the kernel loops over the chunks.
+            struct htp_mm_hvx_vtcm_layout L = {};
             uint32_t best_n_prefetch = 2;
-            for (uint32_t d = max_prefetch; d >= 2; d /= 2) {
-                htp_mm_hvx_vtcm_layout_build(
-                    &L, kparams->kernel_type, wtype, ne10, src1_nrows, sess->n_threads,
-                    0, src0->nb[1], kparams->src1_row_size, 0, d, true, false
-                );
-                if (L.total_bytes <= vtcm_budget) {
-                    best_n_prefetch = d;
+            uint32_t m_chunk = (uint32_t) src1_nrows;
+            bool fits = false;
+            for (; m_chunk >= 8; m_chunk /= 2) {
+                uint32_t max_prefetch = (src1_nrows > HTP_MM_HMX_MIN_NROWS) ? 2 : 16;
+                for (uint32_t d = max_prefetch; d >= 2; d /= 2) {
+                    htp_mm_hvx_vtcm_layout_build(
+                        &L, kparams->kernel_type, wtype, ne10, m_chunk, sess->n_threads,
+                        0, src0->nb[1], kparams->src1_row_size, 0, d, true, false
+                    );
+                    if (L.total_bytes <= vtcm_budget) {
+                        best_n_prefetch = d;
+                        fits = true;
+                        break;
+                    }
+                }
+                if (fits) {
                     break;
                 }
             }
-            if (L.total_bytes > vtcm_budget) {
+            if (!fits) {
                 kparams->kernel_type = HTP_MM_KERNEL_UNSUPPORTED;
                 return;
             }
+            // diagnostic: force a smaller chunk to exercise the tiled path on
+            // short prompts (see Phase 67 diagnostics)
+            static const uint32_t opt_id_mchunk = []() {
+                const char * e = getenv("GGML_HEXAGON_ID_MCHUNK");
+                return e ? (uint32_t) atoi(e) : 0u;
+            }();
+            if (opt_id_mchunk > 0 && opt_id_mchunk < m_chunk) {
+                m_chunk = opt_id_mchunk;
+            }
             kparams->n_prefetch     = best_n_prefetch;
+            kparams->m_chunk        = (m_chunk < (uint32_t) src1_nrows) ? m_chunk : 0;
             kparams->vtcm_size      = L.total_bytes;
             kparams->vtcm_src0_size = L.src0_bytes;
             kparams->vtcm_src1_size = L.src1_bytes;

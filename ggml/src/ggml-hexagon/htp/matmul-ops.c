@@ -1789,7 +1789,11 @@ static void hvx_mm_id(unsigned int nth, unsigned int ith, void * data) {
                 const int               rm2         = row_mapping.i2;  // token idx
 
                 const uint32_t ir1 = fastmodulo(rm1, ne11, &mmctx->mm_div_ne11);        // src1 row idx
-                const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + (ir1 + rm2 * ne11 + 0) * src1_stride);
+                const uint32_t row = ir1 + (uint32_t) rm2 * ne11;
+                if (row < mmctx->cur_m_start || row >= mmctx->cur_m_start + mmctx->cur_m_rows) {
+                    continue;
+                }
+                const uint8_t * restrict src1_col = (const uint8_t *) (src1_data + (row - mmctx->cur_m_start) * src1_stride);
                 float * restrict dst_row = (float *) (dst->data + (rm1 * nb1 + rm2 * nb2 + 0));
 
                 hvx_mm_vec_dot_32x1(mmctx, ith, ne10, &dst_row[ct * 32], w_tile, src1_col, valid_rows);
@@ -4546,11 +4550,15 @@ static int hvx_mm_matmul_id(
 
     const uint32_t qk = QK_Q8_0_TILED;
     const uint32_t nb = (ne10 + qk - 1) / qk;
-    const uint32_t total_nb = act_nrows * nb;
+    const bool m_tiled = kparams->m_chunk != 0 && kparams->m_chunk < act_nrows;
+    const uint32_t m_chunk = m_tiled ? kparams->m_chunk : act_nrows;
 
-    work_queue_func_t quant_task_func;
-    uint32_t n_quant_tasks = 1;
-    if (act_nrows < octx->n_threads) {
+    // One quant task per chunk row when the M rows are split; otherwise the
+    // existing block/row split over all rows is kept.
+    uint32_t n_quant_tasks = MIN(m_chunk, octx->n_threads);
+    work_queue_func_t quant_task_func = htp_mm_act_quant_row_func(src0->type);
+    if (!m_tiled && act_nrows < octx->n_threads) {
+        const uint32_t total_nb = act_nrows * nb;
         n_quant_tasks = MIN(total_nb, octx->n_threads);
         quant_task_func = htp_mm_act_quant_block_func(src0->type);
         for (uint32_t ith = 0; ith < n_quant_tasks; ++ith) {
@@ -4561,14 +4569,11 @@ static int hvx_mm_matmul_id(
             mmctx->quant_r[ith]        = ib_first / nb;
             mmctx->quant_c[ith]        = ib_first % nb;
         }
-    } else {
-        n_quant_tasks = MIN(act_nrows, octx->n_threads);
-        quant_task_func = htp_mm_act_quant_row_func(src0->type);
     }
     size_t src1_row_size  = htp_mm_weight_has_offset(src0->type) ? htp_mm_q8_1_tiled_row_size(ne10) : htp_mm_q8_0_tiled_row_size(ne10);
 
     struct htp_mm_hvx_vtcm_layout L;
-    htp_mm_hvx_vtcm_layout_build(&L, kparams->kernel_type, src0->type, ne10, act_nrows, octx->n_threads,
+    htp_mm_hvx_vtcm_layout_build(&L, kparams->kernel_type, src0->type, ne10, m_chunk, octx->n_threads,
                                  0, src0_row_size, src1_row_size, 0, kparams->n_prefetch, true, false);
 
     const size_t vtcm_size = L.total_bytes;
@@ -4608,20 +4613,25 @@ static int hvx_mm_matmul_id(
     mmctx->vtcm_src2_size_per_thread = 0;
     mmctx->vtcm_dst_size_per_thread  = fastdiv(L.dst_bytes, &octx->n_threads_div);
 
-    mmctx->cur_m_start = 0;
-    mmctx->cur_m_rows  = act_nrows;
-
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
-    if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, 0, act_nrows)) {
-        return HTP_STATUS_INTERNAL_ERR;
+    for (uint32_t m0 = 0; m0 < act_nrows; m0 += m_chunk) {
+        const uint32_t m_rows = MIN(m_chunk, act_nrows - m0);
+
+        mmctx->cur_m_start = m0;
+        mmctx->cur_m_rows  = m_rows;
+
+        if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, m0, m_rows)) {
+            return HTP_STATUS_INTERNAL_ERR;
+        }
+
+        const uint32_t q_tasks = (!m_tiled && act_nrows < octx->n_threads) ? n_quant_tasks : MIN(m_rows, octx->n_threads);
+        mmctx->n_quant_rows_per_thread = (m_rows + q_tasks - 1) / q_tasks;
+        mmctx->n_quant_tasks = q_tasks;
+        work_queue_run(octx->ctx->work_queue, quant_task_func, mmctx, q_tasks);
+
+        work_queue_run(octx->ctx->work_queue, hvx_mmid_task_func, mmctx, octx->n_threads);
     }
-
-    mmctx->n_quant_rows_per_thread = (act_nrows + n_quant_tasks - 1) / n_quant_tasks;
-    mmctx->n_quant_tasks = n_quant_tasks;
-    work_queue_run(octx->ctx->work_queue, quant_task_func, mmctx, n_quant_tasks);
-
-    work_queue_run(octx->ctx->work_queue, hvx_mmid_task_func, mmctx, octx->n_threads);
 
     return HTP_STATUS_OK;
 }
