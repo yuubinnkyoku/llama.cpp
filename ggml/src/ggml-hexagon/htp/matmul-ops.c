@@ -4528,6 +4528,16 @@ static int hmx_mm_op_matmul_id(
     return HTP_STATUS_OK;
 }
 
+// diagnostic: report whether a VTCM guard region still holds its pattern
+static bool htp_mm_canary_ok(const uint8_t * p, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (p[i] != 0xA5) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static int hvx_mm_matmul_id(
     struct htp_ops_context * octx,
     struct htp_mm_context * mmctx,
@@ -4615,11 +4625,41 @@ static int hvx_mm_matmul_id(
 
     htp_trace_event_stop(tr, HTP_TRACE_EVT_INIT, 0);
 
+    // diagnostic canary: the tiled path writes the chunk activations and the
+    // quantized copy into fixed VTCM regions. Guard the end of the layout and
+    // the unused tails so an overrun returns an error instead of corrupting
+    // the next region.
+    const bool canary = m_tiled;
+    uint8_t * canary_end = NULL;
+    if (canary && L.total_bytes + 128 <= octx->ctx->vtcm_size) {
+        canary_end = (uint8_t *) octx->ctx->vtcm_base + L.total_bytes;
+        memset(canary_end, 0xA5, 128);
+    }
+
     for (uint32_t m0 = 0; m0 < act_nrows; m0 += m_chunk) {
         const uint32_t m_rows = MIN(m_chunk, act_nrows - m0);
 
         mmctx->cur_m_start = m0;
         mmctx->cur_m_rows  = m_rows;
+
+        uint8_t * canary_act = NULL;
+        size_t    canary_act_n = 0;
+        uint8_t * canary_src1 = NULL;
+        size_t    canary_src1_n = 0;
+        if (canary) {
+            const size_t used_act = (size_t) m_rows * mmctx->vtcm_act_raw_stride;
+            if (used_act < L.act_raw_bytes) {
+                canary_act   = mmctx->vtcm_act_raw + used_act;
+                canary_act_n = L.act_raw_bytes - used_act;
+                memset(canary_act, 0xA5, canary_act_n);
+            }
+            const size_t used_src1 = (size_t) m_rows * mmctx->vtcm_src1_stride;
+            if (used_src1 < L.src1_bytes) {
+                canary_src1   = mmctx->vtcm_src1 + used_src1;
+                canary_src1_n = L.src1_bytes - used_src1;
+                memset(canary_src1, 0xA5, canary_src1_n);
+            }
+        }
 
         if (!hvx_mm_transfer_src1_dma(octx, kparams, src1, mmctx->vtcm_act_raw, mmctx->vtcm_act_raw_stride, m0, m_rows)) {
             return HTP_STATUS_INTERNAL_ERR;
@@ -4631,6 +4671,19 @@ static int hvx_mm_matmul_id(
         work_queue_run(octx->ctx->work_queue, quant_task_func, mmctx, q_tasks);
 
         work_queue_run(octx->ctx->work_queue, hvx_mmid_task_func, mmctx, octx->n_threads);
+
+        if (canary) {
+            const bool act_ok  = !canary_act  || htp_mm_canary_ok(canary_act,  canary_act_n);
+            const bool src1_ok = !canary_src1 || htp_mm_canary_ok(canary_src1, canary_src1_n);
+            const bool end_ok  = !canary_end  || htp_mm_canary_ok(canary_end,  128);
+            if (!act_ok || !src1_ok || !end_ok) {
+                FARF(ERROR, "matmul-id-%s : VTCM canary broken at m0 %u rows %u : act %d src1 %d end %d\n",
+                     mmctx->type, m0, m_rows, (int) act_ok, (int) src1_ok, (int) end_ok);
+                if (!act_ok)  return HTP_STATUS_VTCM_TOO_SMALL;
+                if (!src1_ok) return HTP_STATUS_INVAL_PARAMS;
+                return HTP_STATUS_NO_SUPPORT;
+            }
+        }
     }
 
     return HTP_STATUS_OK;

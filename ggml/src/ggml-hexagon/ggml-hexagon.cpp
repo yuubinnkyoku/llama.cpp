@@ -7146,11 +7146,17 @@ static bool ggml_hexagon_supported_mul_mat_id(const struct ggml_hexagon_session 
     // ubatch shape and can still fall back.
     const bool placement_probe = !src0->buffer ||
         ggml_backend_buffer_get_size(src0->buffer) == 0;
+    // the probe token count is a diagnostic knob: a large value makes the
+    // default placement fail so an explicit tensor override decides the placement
+    static const int64_t opt_probe_tokens = []() {
+        const char * e = getenv("GGML_HEXAGON_ID_PROBE_TOKENS");
+        return e ? (int64_t) atoi(e) : (int64_t) 8;
+    }();
     struct ggml_tensor src1_probe;
     const struct ggml_tensor * src1_check = src1;
-    if (placement_probe && src1->ne[2] > 8) {
+    if (placement_probe && src1->ne[2] > opt_probe_tokens) {
         src1_probe = *src1;
-        src1_probe.ne[2] = 8;
+        src1_probe.ne[2] = opt_probe_tokens;
         src1_check = &src1_probe;
     }
 
