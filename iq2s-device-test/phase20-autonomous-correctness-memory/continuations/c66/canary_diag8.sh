@@ -1,0 +1,20 @@
+#!/bin/bash
+# Phase 69: canary v3 (src1 tail + layout end) diagnostic.
+set -u
+export MSYS_NO_PATHCONV=1
+A=adb
+B=/data/local/tmp/c61-inkling2
+D=D:/ghq/github.com/yuubinnkyoku/llama.cpp-c61/iq2s-device-test/phase20-autonomous-correctness-memory/continuations/c66/mtile-diag
+$A push "$D/libggml-htp-v81-canary3.so" $B/diag-htp-canary3.so >/dev/null
+$A shell "rm -rf $B/variant-diag; cp -a $B/libs $B/variant-diag; cp $B/diag-htp-canary3.so $B/variant-diag/libggml-htp-v81.so; cp $B/diag-hex.so $B/variant-diag/libggml-hexagon.so; sha256sum $B/variant-diag/libggml-htp-v81.so"
+echo "== mem"
+$A shell "grep -E '^(MemAvailable|SwapFree):' /proc/meminfo"
+run() { # tag pt mchunk
+  echo "== run $1 PT=$2 m_chunk=$3"
+  $A shell "LIBDIR=$B/variant-diag GGML_HEXAGON_ID_MCHUNK=$3 PT=$2 NB=32 NUB=32 FA_SELECT=1 DMA64=0 SMALLMM=0 OVERRIDE=override-down-24.txt sh $B/p62_probe.sh c69_$1 1 48 HTP0:0" >/dev/null 2>&1
+  echo "rc=$?"
+  $A shell "grep -a -E 'dsp-error|TOKEN step 0|PREFILL' $B/runs/c69_$1/stdout.txt $B/runs/c69_$1/stderr.txt 2>/dev/null | head -4; grep -a 'model buffer size' $B/runs/c69_$1/stderr.txt | grep -a HTP; grep -a swap_total $B/runs/c69_$1/manifest.txt; sha256sum $B/runs/c69_$1/logits.f32 2>/dev/null"
+}
+run a 5 32
+run b 17 128
+echo "== done"
