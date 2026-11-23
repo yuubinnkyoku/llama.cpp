@@ -50,3 +50,27 @@
 - `c66/mtile-diag/`（診断 lib 2 種）
 - `c66/mtile_diag1.sh`（診断 1 スクリプト）
 - コミットは本 report とともに push する。
+
+## §5 追記（22:15）: M タイル診断の結果 — 3 構成で bit 一致、prefill 128 まで無事故
+
+すべて `gate with --project inkling2` 経由。診断は 6 層 override ではなく **24 層 down override（HTP buffer 5,531.11 MiB）** で実施した（診断 host lib が 8-token cap の既定配置で 23 層を載せるため、6 層 override は実質 24 層になる。配置の実態は buffer サイズで確認）。
+
+| 診断 | 構成 | 結果 |
+| --- | --- | --- |
+| 1 | 5-token（40 行）、m_chunk=32 → 2 chunk（32+8） | rc=0、first token 182416、logit 27.2261276、swap 1.37 GiB |
+| 2 | 同 5-token、非タイル vs タイル（m_chunk=32） | **logits sha256 一致** `74f01fcacd…d3d2d239`、swap 0.72 / 0.76 GiB |
+| 3 | 17-token（136 行）、m_chunk=128 → 2 chunk（128+8） | **logits 一致** `2c65522086…5a019a51`、first token 151435、swap 0.86 / 0.78 GiB |
+| 4 | 32-token（256 行）、m_chunk=128 → 2 chunk（128+128） | rc=0、first token 159033（CPU 参照も 159033、logit 差 0.098）、swap 0.75 GiB |
+| 5 | prefill 128 token（32-token ubatch × 4）、m_chunk=128 | prefill 21.6 s（5.92 t/s）、first token 149890、**crash なし**、swap 1.55 GiB で guard 停止（測定は無効、経路は生存） |
+
+- **チャンク境界の数値は非タイルと bit 一致**（診断 2/3）。タイル化の行分割・転送・量子化はこの範囲で正しい。
+- 診断 4 の 256 行は Phase 65 の prefill 512 で再起動したときの ubatch 形状そのもの。今回は 2 chunk で完走し、CPU 参照と first token 一致。
+- 診断 5 で tiled prefill 128 token（4 ubatch）が完走（crash なし）。swap 1.55 GiB は 10.7 GB 開始時の page cache churn で、測定としては無効。
+- **一連の診断で端末再起動なし**（uptime 21 時間 44 分、00:32 の再起動以来）。
+- 残る工程: ③ VTCM/DMA canary（DSP 側センチネル）、④ 11 GB + warmup での prefill 512（Phase 65 の再起動条件）。canary 実装は次回。
+
+## §6 追加の成果物
+
+- `c66/mtile_diag2.sh`〜`mtile_diag6.sh`（診断 1〜5）
+- `c66/clean_runs.sh`（古い logits の削除。`runs/` 989 MB → 392 MB、/data 4.3 → 4.9 GB）
+- 診断 lib: skel `cced2257…`、host `76848910…`（`c66/mtile-diag/`、端末では `variant-diag/`）
