@@ -876,6 +876,7 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_UNARY_LOG:
         case HTP_OP_UNARY_RELU:
         case HTP_OP_UNARY_STEP:
+        case HTP_OP_UNARY_CEIL:
         case HTP_OP_L2_NORM:
             return op_unary(octx);
 
@@ -948,6 +949,12 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_ROLL:
             return op_roll(octx);
 
+        case HTP_OP_POOL_2D:
+            return op_pool_2d(octx);
+
+        case HTP_OP_POOL_1D:
+            return op_pool_1d(octx);
+
         case HTP_OP_CONCAT:
             return op_concat(octx);
 
@@ -956,6 +963,9 @@ static int execute_op(struct htp_ops_context * octx) {
 
         case HTP_OP_TRI:
             return op_unary(octx);
+
+        case HTP_OP_UPSCALE:
+            return op_upscale(octx);
 
         case HTP_OP_INVALID:
             break;

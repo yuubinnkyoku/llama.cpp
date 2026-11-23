@@ -192,8 +192,11 @@ int op_solve_tri(struct htp_ops_context * octx);
 int op_gated_delta_net(struct htp_ops_context * octx);
 int op_pad(struct htp_ops_context * octx);
 int op_im2col(struct htp_ops_context * octx);
+int op_pool_2d(struct htp_ops_context * octx);
+int op_pool_1d(struct htp_ops_context * octx);
 int op_allreduce(struct htp_ops_context * octx);
 int op_roll(struct htp_ops_context * octx);
+int op_upscale(struct htp_ops_context * octx);
 
 // IQ2_S VTCM codebook management (matmul-ops.c)
 void htp_iq2s_grid_ensure(struct htp_context * ctx);
