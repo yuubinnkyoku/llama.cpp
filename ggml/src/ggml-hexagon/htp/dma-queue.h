@@ -107,6 +107,14 @@ typedef struct {
 #define DMA_MAX_STRIDE_24B     0x00FFFFFFu    // 24-bit HW descriptor limit for strides (16MB - 1)
 #define DMA_SAFE_CHUNK_SIZE    0x00F00000u    // ~15MB safe contiguous chunk size
 
+#if __HVX_ARCH__ < 75
+#define DMA_MAX_2D_ROW_SIZE    DMA_MAX_SIZE_16B
+#define DMA_MAX_2D_STRIDE      DMA_MAX_STRIDE_16B
+#else
+#define DMA_MAX_2D_ROW_SIZE    DMA_MAX_SIZE_24B
+#define DMA_MAX_2D_STRIDE      DMA_MAX_STRIDE_24B
+#endif
+
 #define DMA_FALLBACK_CAPACITY  16u            // descriptors in secondary fallback ring
 
 typedef struct dma_ring_s dma_ring;
@@ -140,10 +148,7 @@ dma_queue_t dma_queue_alias_init(void * ptr, dma_queue_t main_q);
 void        dma_queue_alias_free(dma_queue_t q);
 
 bool        dma_queue_push_fallback_2d(dma_queue * q, dma_data ddata, size_t dst_stride, size_t src_stride, size_t row_size, size_t nrows);
-bool        dma_queue_push_fallback_contig(dma_queue * q, dma_data ddata, size_t total);
-#if __HVX_ARCH__ < 75
 bool        dma_queue_push_fallback_1d(dma_queue * q, dma_data ddata, size_t dst_stride, size_t src_stride, size_t row_size, size_t nrows);
-#endif
 
 // TODO: technically we don't need these and could use Q6_dmstart/wait/etc instead
 // but those do not seem to always compiler properly.
@@ -284,6 +289,16 @@ static inline bool dma_ring_push_single_2d(dma_ring * r, dma_data ddata, size_t 
     return true;
 }
 
+#if __HVX_ARCH__ < 75
+static inline bool dma_ring_push_single_contig(dma_ring * r, dma_data ddata, size_t size) {
+    return dma_ring_push_single_1d(r, ddata, size);
+}
+#else
+static inline bool dma_ring_push_single_contig(dma_ring * r, dma_data ddata, size_t size) {
+    return dma_ring_push_single_2d(r, ddata, size, size, size, 1);
+}
+#endif
+
 static inline dma_data dma_ring_pop(dma_ring * r) {
     dma_data ddata = { 0 };
 
@@ -392,7 +407,7 @@ static inline bool dma_queue_push(dma_queue *q, dma_data ddata, size_t dst_strid
         if (total <= DMA_MAX_SIZE_24B) {
             return dma_ring_push_single_1d(q->ring0, ddata, total);
         }
-        return dma_queue_push_fallback_contig(q, ddata, total);
+        return dma_queue_push_fallback_1d(q, ddata, 0, 0, total, 1);
     }
 
     // Row count overflow with 16-bit strides: chunk 2D descriptors via fallback ring
@@ -415,13 +430,11 @@ static inline bool dma_queue_push(dma_queue *q, dma_data ddata, size_t dst_strid
         return dma_ring_push_single_2d(q->ring0, ddata, dst_stride, src_stride, row_size, nrows);
     }
 
-    // Contiguous block exceeding 24 bits
-    if (nrows == 1 || (row_size == src_stride && row_size == dst_stride)) {
-        size_t total = row_size * nrows;
-        return dma_queue_push_fallback_contig(q, ddata, total);
+    // 3. Cold path: Descriptor chunking fallbacks (< 0.1%)
+    if ((row_size | src_stride | dst_stride) <= DMA_MAX_2D_ROW_SIZE) {
+        return dma_queue_push_fallback_2d(q, ddata, dst_stride, src_stride, row_size, nrows);
     }
-
-    return dma_queue_push_fallback_2d(q, ddata, dst_stride, src_stride, row_size, nrows);
+    return dma_queue_push_fallback_1d(q, ddata, dst_stride, src_stride, row_size, nrows);
 }
 
 #endif
