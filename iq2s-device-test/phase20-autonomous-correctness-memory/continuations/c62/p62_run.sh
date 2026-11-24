@@ -11,7 +11,7 @@
 set -u
 BASE=/data/local/tmp/c46-27b
 L=$BASE/libs
-SKEL=${P62_SKEL:-76dd89e3bf2af1576101eba7bb10e5b9d750191fdc92b6a1fc019967166782ef}
+SKEL=${P62_SKEL:-$(sha256sum $L/libggml-htp-v81.so | cut -d' ' -f1)}
 CPU_BASE=0a3db9c5e5c50573c2a96b652217c3a89eaa2f4cc6f0fdd8507f62a1553487d9
 TIMEOUT=${TIMEOUT:-1800}
 
@@ -22,6 +22,11 @@ tz0() { cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null; }
 # An empty $1 keeps whatever is installed; an empty $2 skips the sha check.
 set_cpu() {
     [ -n "${1:-}" ] || { echo "P62_CPU unchanged $(sha256sum $L/libggml-cpu.so | cut -d' ' -f1)"; return 0; }
+    # copying a file onto itself is a no-op, not an error
+    if [ "$L/$1" = "$L/libggml-cpu.so" ]; then
+        echo "P62_CPU in place $(sha256sum $L/libggml-cpu.so | cut -d' ' -f1)"
+        return 0
+    fi
     cp "$L/$1" $L/libggml-cpu.so || return 2
     chmod 644 $L/libggml-cpu.so
     GOT=$(sha256sum $L/libggml-cpu.so | cut -d' ' -f1)
