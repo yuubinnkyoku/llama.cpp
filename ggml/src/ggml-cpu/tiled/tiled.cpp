@@ -570,14 +570,11 @@ static void tiled_unpack_src1_q8_K(const block_q8_K * const * rows, int n_rows, 
 }
 
 // GGML_CPU_TILED_MM: master switch. On by default on x86 (where the microkernel is
-// hand-optimized); on ARM the NEON kernel is new, so it stays off unless asked for.
+// hand-optimized); the ARM NEON kernel is on by default too since Phase 63, where
+// the integrated build held the replay hash and the quality gate.
 // If off, we fast return false and normal vec_dot mul_mat resumes
 static bool ggml_tiled_matmul_enabled(void) {
-#if defined(__ARM_NEON)
-    static bool enabled = false;
-#else
     static bool enabled = true;
-#endif
     static std::once_flag flag;
     std::call_once(flag, []() {
         const char * env = getenv("GGML_CPU_TILED_MM");
