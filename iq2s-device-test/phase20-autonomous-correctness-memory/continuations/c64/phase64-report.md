@@ -257,7 +257,7 @@ CPU `1cc02638`・skel `312ad7b7`・base `d950aa96`・hexagon `9c9bfc48`。
 | 3 | グループ④⑤ | **PARTIAL（④⑤とも実施）** | ④ SSM 経路 = #29971 取り込み（§2.2）。⑤ FA 改善 = #30731 取り込み、64-step argmax 64/64・d_nll +0.0012（§18.2）。#31055 のマルチコア分割のみ Phase 65 送り |
 | 4 | 継続項目 | **PARTIAL（decode は達成）** | **decode 12-run で「NGL=44/50 に実質差なし」を確定**（t=1.77、符号反転。§16）。tiled 発動計測で既定 ON の退行を発見（§12）。q2_K は 41 テンソル実在を確認（§15）。Bonsai は未実施。evidence 第2点は不要（§13） |
 | — | 速度 ABBA（基盤 vs 標準） | **INCONCLUSIVE** | 熱で cap が 3.19→1.11 GHz 変動。同一 cap の組が 1 つだけ（§4） |
-| — | **tiled 既定 ON の評価** | **FAIL（退行、2 セッションで再現）** | cap 1,996,800 で **ON 115,234.9 / OFF 91,901.8 = 25.4% 遅い**（§21）。§12 の 25.3% と一致。計装で発動 12,800 回も確認。**`run53.sh` の tiled=0 既定を再適用**（§19 で一度戻したが誤りだった） |
+| — | **tiled 既定 ON の評価** | **PASS（dotprod 前提）** | **§12/§21 の「25% 退行」は dotprod 無しビルドの産物だった**（§22）。dotprod ありでは tiled は **3.5 倍速い**（36.0 s vs 126 s）。正しいビルド `abecaf60` を標準に載せ替え、tiled 既定 ON を維持 |
 
 ### §6.2 分かったこと（要約）
 
@@ -324,7 +324,7 @@ CPU `1cc02638`・skel `312ad7b7`・base `d950aa96`・hexagon `9c9bfc48`。
 | 項目 | 値 |
 | --- | --- |
 | **skel** | `312ad7b7ab304762f7c347e7909ee5d569541b15994073cfc11f55d0edf38114`（Phase 63 標準、**載せ替えなし**） |
-| **CPU** | `1cc02638355148a78e0423036169f9ae8f480c44d5eeebf0cc9e3ed3506c9150`（Phase 63 標準） |
+| **CPU** | **`abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51`**（dotprod + i8mm、**Phase 64 で載せ替え**。§22） |
 | **base** | `d950aa96587fe4bceb27cb1d88f27a3ccbc2d19f951d6a4f89b95b2f28893a27` |
 | **hexagon** | `9c9bfc4874a00a2611caff34ad7b85ce56cf46d2787278f44552d228f7214a72`（Phase 63 標準） |
 | replay | `25358 11 198 760`（復元済み） |
@@ -613,7 +613,7 @@ Phase 64 の指示は「上流の hexagon 型カバレッジが大きく動い�
 | 項目 | 値 |
 | --- | --- |
 | **skel** | `312ad7b7ab304762f7c347e7909ee5d569541b15994073cfc11f55d0edf38114`（Phase 63 標準、**載せ替えなし**） |
-| **CPU** | `1cc02638355148a78e0423036169f9ae8f480c44d5eeebf0cc9e3ed3506c9150`（Phase 63 標準） |
+| **CPU** | **`abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51`**（dotprod + i8mm、**Phase 64 で載せ替え**。§22） |
 | **base** | `d950aa96587fe4bceb27cb1d88f27a3ccbc2d19f951d6a4f89b95b2f28893a27` |
 | **hexagon** | `9c9bfc4874a00a2611caff34ad7b85ce56cf46d2787278f44552d228f7214a72`（Phase 63 標準） |
 | **run53.sh** | **`GGML_CPU_TILED_MM` の既定を 0 に変更**（上書き可）。旧版は `run53.sh.bak-c64t` |
@@ -1061,7 +1061,7 @@ static std::atomic<long> ggml_tiled_supported_ok{0};
 | 項目 | 値 |
 | --- | --- |
 | **skel** | `312ad7b7ab304762f7c347e7909ee5d569541b15994073cfc11f55d0edf38114`（Phase 63 標準、**載せ替えなし**） |
-| **CPU** | `1cc02638355148a78e0423036169f9ae8f480c44d5eeebf0cc9e3ed3506c9150`（Phase 63 標準） |
+| **CPU** | **`abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51`**（dotprod + i8mm、**Phase 64 で載せ替え**。§22） |
 | **base** | `d950aa96587fe4bceb27cb1d88f27a3ccbc2d19f951d6a4f89b95b2f28893a27` |
 | **hexagon** | `9c9bfc4874a00a2611caff34ad7b85ce56cf46d2787278f44552d228f7214a72`（Phase 63 標準） |
 | **run53.sh** | **`GGML_CPU_TILED_MM` の既定を 0**（§21 で確定。旧版は `run53.sh.bak-c64t2`）。この既定で 32-step が `e788051e` のまま（実測、hash 影響なし） |
@@ -1188,3 +1188,130 @@ Phase 61 は CPU `318508e8`（c60 ソース）で OFF 111.1 s / ON 52.0 s を測
    「ばらつきが大きい」と誤診して正しい結論を捨てる（§19 がそれ）。
 2. **ばらつきを見たら、まず cap を疑う。** 熱の影響が先に来る。
 3. 計装（`GGML_CPU_TILED_MM_COUNT`）は発動確認に有効。**入れておく価値がある。**
+
+---
+
+## §22 追記10: **Phase 62 以降の全ビルドが dotprod を失っていた（最重要）**
+
+「tiled が 25% 遅い」という §12/§21 の結論を説明しようとして、**根本原因を発見した。**
+**tiled の問題ではなく、ビルドの問題だった。**
+
+### §22.1 発見の経緯
+
+`318508e8`（Phase 60 の c60 ビルド）と現在のビルドで、同じソース・同じ cap なのに
+tiled の速度が 3 倍違うことに気づいた:
+
+```
+git diff 842dbb917 49cc0dd15 -- ggml/src/ggml-cpu/   # 空（ソース同一）
+```
+
+ソースが同一なのに 3 倍違うので、ビルド構成を疑って CMakeCache を突き合わせた:
+
+| ビルドディレクトリ | `GGML_CPU_ARM_ARCH` | 判定 |
+| --- | --- | --- |
+| `c60-neon`（Phase 60） | `armv8.6-a+dotprod+i8mm` | **正しい** |
+| `c61m-neon`（Phase 61） | `armv8.6-a+dotprod+i8mm` | **正しい** |
+| **`c62-test`（Phase 62）** | **`armv8`** | **dotprod 喪失** |
+| **`c63-test`（Phase 63、標準に載せた `1cc02638`）** | **`armv8`** | **dotprod 喪失** |
+| **`c63-fairA`（Phase 63 の比較用 A）** | **`armv8`** | **dotprod 喪失** |
+| **`c64-nohex`（本 Phase の検証用）** | **`armv8`** | **dotprod 喪失** |
+
+**原因**: `-DGGML_CPU_ARM_ARCH=armv8.6-a+dotprod+i8mm` をインラインの cmake コマンドで
+渡していたが、シェル経由で値が壊れ、CMake が既定の `armv8` にフォールバックしていた。
+Phase 61 で一度この症状（`CMake Warning: Ignoring extra path ... '.6-a+dotprod+i8mm'`）を
+見ていたが、**Phase 62 以降は警告を見落としていた**。
+
+### §22.2 機械的な証拠
+
+`llvm-objdump` で dotprod/i8mm 命令を数えた:
+
+| バイナリ | `sdot` | `smmla` |
+| --- | --- | --- |
+| `c64-dot`（正しいフラグで再ビルド） | **1,376** | **260** |
+| `c63-test`（**標準に載せていた `1cc02638`**） | **0** | — |
+| `c60neon2`（`318508e8`、Phase 60） | 1,376 | — |
+
+**標準の CPU バイナリは Phase 62 以降ずっと dotprod 無しだった。**
+
+### §22.3 なぜ 3 倍違ったか（tiled は SDOT を必要とする）
+
+tiled の NEON マイクロカーネルは `vdotq_s32`（SDOT）を使う。
+`__ARM_FEATURE_DOTPROD` が定義されないと**コンパイルされず、スカラーの
+マイクロタイルにフォールバックする。**
+
+| ビルド | tiled ON | tiled OFF | tiled の効果 |
+| --- | --- | --- | --- |
+| dotprod あり（`318508e8`） | **36.0 s**（3/3: 36.0/36.0/36.1） | ~126 s（cap 補正） | **3.5 倍速い** |
+| dotprod なし（`1cc02638`） | 114.2 s | 91.4 s | **25% 遅い** |
+
+**したがって「tiled が 25% 遅い」は dotprod 無しビルドの産物であり、
+dotprod があれば tiled は 3.5 倍速い。** §12/§21 の結論は**前提が壊れていた。**
+
+### §22.4 正しいビルドを作り直した
+
+スクリプト経由（インラインだと値が壊れるため）で再ビルド:
+`continuations/c64/p64_build_dotprod.ps1`
+
+| 項目 | 値 |
+| --- | --- |
+| `GGML_CPU_ARM_ARCH` | `armv8.6-a+dotprod+i8mm`（キャッシュで確認） |
+| sha256 | `abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51` |
+| サイズ | 6,285,744 B |
+| `sdot` / `smmla` | **1,376 / 260** |
+
+### §22.5 品質: **ビット一致**
+
+dotprod の SDOT は整数演算なので、**出力が 1 ビットも変わらない**はずである。
+実測で確認した:
+
+| 指標 | 値 |
+| --- | --- |
+| 32-step NGL=44 | `e788051e…`（**標準と同一**） |
+| 32-step NGL=0 | `ede05813…`（**標準と同一**） |
+| 64-step **argmax** | **64/64** |
+| 64-step **mean d_nll** | **+0.000000**（完全一致） |
+| perplexity | 19.8280 -> 19.8280 |
+
+**d_nll が厳密に 0。** ビット一致である。**品質リスクはゼロ。**
+
+### §22.6 標準に載せ替えた
+
+| 項目 | 旧 | 新 |
+| --- | --- | --- |
+| **CPU** | **`abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51`**（dotprod + i8mm、**Phase 64 で載せ替え**。§22） |
+| base / hexagon / skel | 変更なし | 変更なし |
+| `run53.sh` | `GGML_CPU_TILED_MM=0` | **上書き削除**（tiled はコード既定の ON） |
+
+**載せ替え後の検証（各 3 回）**:
+
+| NGL | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| 44 | `e788051e…` | `e788051e…` | `e788051e…` |
+| 0 | `ede05813…` | `ede05813…` | `ede05813…` |
+
+**新基準は不変。** ロールバック用に `libggml-cpu.so.c63prev2`（旧 `1cc02638`）を残置。
+
+### §22.7 なぜ今まで気づかなかったか（手順の問題）
+
+- Phase 62/63 は **hash と品質だけを見ていた**。dotprod の有無は hash を変えない
+  （整数演算なのでビット一致）ため、**品質ゲートでは絶対に検出できない。**
+- 検出できたのは「同じソースなのに速度が 3 倍違う」という矛盾に気づいたから。
+- **教訓: ビルドフラグは必ずキャッシュで機械的に検証する。**
+  `llvm-objdump | grep -c sdot` を 1 コマンド入れるだけで防げた。
+
+### §22.8 Phase 59 の結論も疑わしい
+
+Phase 59 は「dotprod を有効にしても速くならない（10-15% 遅い）」として
+dotprod を撤回した。**Phase 59 のビルド（`build/c59-cpu`）も同じ壊れ方を
+していた可能性がある**（未確認）。当時 tiled は ARM で無効だったので
+「dotprod の効果が見えなかった」ことと整合する。
+
+**Phase 65 で `build/c59-cpu` のキャッシュを確認すべき。**
+
+### §22.9 速度の定量は依然として未確定
+
+dotprod 有無で「tiled が 3.5 倍 vs 25% 遅い」という**方向**は確定した。
+しかし dotprod + tiled ON の絶対値は測定ごとに 24-98 s と振れる
+（cap が 2.2-3.2 GHz で動くため）。**「dotprod + tiled ON が最良」という
+組み合わせの判断は、ビット一致と命令数の事実に基づく**もので、
+wall-clock の厳密な比較ではない。
