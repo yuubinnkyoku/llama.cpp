@@ -38,3 +38,21 @@
 
 - 本 report（c72）。`c66/cleanup_and_run.sh`（cleanup + A/B 一括ゲート）、`c66/ab70.sh`（serial 自動解決）、`c66/hash32.sh`、`c66/install_and_verify.sh`、`c72-libs/`（新標準 lib のコピー）。
 - コミットは本 report とスクリプトを push する。
+
+## §5 追記（02:40）: NUB=32 常用構成の検証
+
+新標準 lib（host `fac8335e…`、skel `f7def940…`）での検証:
+
+| 項目 | 値 |
+| --- | --- |
+| replay 4 token（NUB=32） | **`65dd1c56…` 一致**、HTP buffer 5,348.86 MiB、first token 182416、swap 0.06 GiB |
+| decode 32-step（NUB=32、default） | **377.6 ms/step**（prefill 5-token 868 ms）、swap 0.50 GiB |
+| prefill 512（NUB=32、A/B の p32） | 61,986 ms（**8.26 t/s**）、swap 0.40 GiB |
+| 64-step 品質ゲート（NUB=32） | CPU 参照 64 step **434.1 ms/step**（有効、swap 0）。HTP 64 step は 11.4 GB 開始で swap 1.58 GiB となり guard 停止（**無効**）。cleanup 後の再試行は MemAvailable 11,468,844 kB（閾値まで 65 MB 不足）で LOW。 |
+
+- 64-step 品質ゲートは NUB=8 で Phase 66 に PASS 済み。NUB=32 の HTP 64-step はメモリ窓が取れ次第の追加確認（カーネルは Phase 67/69 で bit 一致検証済みのため必須ではない）。
+- CPU 参照の 434.1 ms/step は同一夜間の冷却状態での値。絶対値は熱状態で変動するため、A/B 判定には使わない（同一セッション比較のみ）。
+
+## §6 追記（02:45）: 次工程の候補
+
+- host 側 guard 解除（mix() の CONT 3D/F32 3D MUL_MAT、PAD の DMA64 extended mapping）は、配置が変わり logits が変わるため**凍結 hash `65dd1c56…` と bit 一致しない**。実施には Phase 65 と同様の hash 再凍結の所有者判断が必要。
