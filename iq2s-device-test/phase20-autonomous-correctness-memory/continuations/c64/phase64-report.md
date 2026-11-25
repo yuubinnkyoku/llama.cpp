@@ -250,11 +250,11 @@ CPU `1cc02638`・skel `312ad7b7`・base `d950aa96`・hexagon `9c9bfc48`。
 
 | # | 目標 | 判定 | 根拠 |
 | --- | --- | --- | --- |
-| 0 | ゲート | **PARTIAL** | unit 15/15 + 88/88、標準組の 64-step NLL 一致（§0）。32-step の `e788051e` 確認は 64-step の NLL 一致で代替 |
+| 0 | ゲート | **PASS** | unit 15/15 + 88/88、標準組で 32-step が **`e788051e`（NGL=44）/ `ede05813`（NGL=0）に一致**（§18.1） |
 | 1 | Op Fusion rework | **BLOCKED（取らないと判断）** | **前段の repack rework を取ると fork の中核（IQ2/IQ3 tiled）が消える**ため不採用と判断（§17）。上流の tiled 型表に IQ2/IQ3 が無く、`matmul-ops.c` の IQ 参照は fork 160 / 上流 0。Op Fusion はその後段なので併せて不可 |
 | 2 | repack rework + q2_K | **PARTIAL（q2_K 達成、rework は不採用）** | **q2_K が動作**（Phase 62 の 0 トークン故障を解消、41 テンソル実在を確認）。64-step argmax 63/64、d_nll +0.0007。**repack rework は §17 の理由で取らないと判断** |
 | 2b | 主力 5 型の無傷確認 | **PASS** | argmax 63/64、PPL 差 0.07%、d_nll が統計的にゼロ（§2.5） |
-| 3 | グループ④⑤ | **PARTIAL** | ④ SSM 経路は達成（#29971 取り込み）。⑤ FA 改善は未着手 |
+| 3 | グループ④⑤ | **PARTIAL（④⑤とも実施）** | ④ SSM 経路 = #29971 取り込み（§2.2）。⑤ FA 改善 = #30731 取り込み、64-step argmax 64/64・d_nll +0.0012（§18.2）。#31055 のマルチコア分割のみ Phase 65 送り |
 | 4 | 継続項目 | **PARTIAL（decode は達成）** | **decode 12-run で「NGL=44/50 に実質差なし」を確定**（t=1.77、符号反転。§16）。tiled 発動計測で既定 ON の退行を発見（§12）。q2_K は 41 テンソル実在を確認（§15）。Bonsai は未実施。evidence 第2点は不要（§13） |
 | — | 速度 ABBA（基盤 vs 標準） | **INCONCLUSIVE** | 熱で cap が 3.19→1.11 GHz 変動。同一 cap の組が 1 つだけ（§4） |
 | — | **tiled 既定 ON の評価** | **FAIL（退行）** | **CPU prefill が 25.3% 遅い**（cap 1,996,800 で ON 114,470.8 / OFF 91,346.9 ms、各 4 run）。`GGML_CPU_TILED_MM=0` は hash 不変（`e788051e`）なので無コストで回避可。run53.sh の既定を 0 にした（§12） |
@@ -898,3 +898,79 @@ static inline bool htp_kparams_check(Args &&... args) {
 **どちらも Phase 65 の設計判断**であり、本 Phase では決めない。
 **判断材料として確実なのは「安い道は無い」ということ**である。
 §17.6 の「(b) が安い」は撤回する。
+
+---
+
+## §18 追記7: 目標0 と 目標3⑤ を明示的に完了
+
+### §18.1 目標0 の 32-step 確認（標準組）
+
+本 Phase の序盤は 64-step の NLL 一致で「標準組は無事」と判定していたが、
+指示が求める**32-step の明示的確認**を最後に実施した。
+
+標準組（CPU `1cc02638`・skel `312ad7b7`・hexagon `9c9bfc48`・base `d950aa96`）で:
+
+| run | NGL | exit | sha256(logits.f32) | 既知値 | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| `20261126-042650-10385` | 44 | 0 | `e788051e16d7e1e63b140a902418c75f779bfe29cfb320bb054598508b09d4eb` | 同左 | **一致** |
+| `20261126-042757-13156` | 0 | 0 | `ede05813034c131e8ecadcb2ecb3eb34e8bf291f0b9ebb49bd7a5541ca97d9e9` | 同左 | **一致** |
+
+**目標0 は PASS（完了）。** 標準組は Phase 63 から無傷。
+
+### §18.2 目標3⑤: FA 改善（#30731）を取り込んだ - **PASS**
+
+「SSM（④）を優先、続いてFA改善（⑤）」の**⑤を実施した**。
+
+| commit | PR | 内容 |
+| --- | --- | --- |
+| `31288c9c6` | #30731 | FLASH_ATTN_EXT の長文脈・SWA 改善 |
+
+#### 競合の解決（4 ハンク / 2 ファイル）
+
+**`flash-attn-ops.c`（3 ハンク）**: 上流側を採用。上流は 2 つの機構を足している:
+1. **active KV block のスキャン**（`fa_scan_active_blocks`）: mask が除外する
+   ブロックを飛ばす。SWA（sliding window attention）で効く。
+2. **初回 DMA の発火条件の変更**: 「q ブロックの最初 かつ kv head の最初」から
+   「この q ブロックの最初の kv head」へ。
+
+どちらも fork に無かった機構なので、上流をそのまま採った。
+
+**`ggml-hexagon.cpp`（1 ハンク）**: fork が上流の FA ヒューリスティックを
+早期 `return true;` に置き換えており、上流側はその**到達不能コード**になる。
+**HEAD を採用**（fork の簡略化を維持）。
+
+#### #31055（KV-head team split）は不採用
+
+`31288c9c6` のループは `kv_head_min` / `kv_head_max` を使うが、その宣言は
+**#31055（マルチコアの KV head チーム分割）**が導入するもの。fork のデバイス・
+スレッド処理が違うため、そのブロックは適用されなかった（`kv_per_team` /
+`kv_per_core` が 0 件）。
+
+**対策**: 範囲を全範囲として宣言し、理由をコメントに残した:
+
+```c
+// #30731 uses a kv_head range; the fork has no team split (#31055), so it is the full range.
+const uint32_t kv_head_min = 0;
+const uint32_t kv_head_max = n_kv_heads;
+```
+
+これで**スキャンと DMA 再配置は入り、マルチコア分割だけが Phase 65 送り**になる。
+#31055 は fork のスレッドモデルを適応させる必要がある。
+
+#### 検証（FA は全 decode ステップを通るので必須）
+
+| 項目 | 結果 |
+| --- | --- |
+| unit stage | **15/15 + 88/88** |
+| 32-step NGL=44 | exit 0、hash `8259e4b08000c201cc2d7d3c49fddad477b6c0011859c099e213cd93509f3bd8` |
+| **64-step argmax** | **64/64** |
+| mean d_nll | **+0.001221**（se 0.002386、**t = +0.51**） |
+| perplexity | 19.8280 -> 19.8522 |
+| 32-step NGL=0 | `ede05813…`（**標準と同一**） |
+
+**PASS。** FA を触ったのに 64-step の argmax が 64/64、d_nll が 0.001 に収まり、
+NGL=0 の hash も不変。**数値的に中立な改善**である。
+
+ビルド sha256:
+- `libggml-htp-v81.so` = `cdc628a9849b9f211c50bd7f2dca4c54e846b24034afaf189c2a1d2621c8abe2`
+- `libggml-hexagon.so` = `c9dadbdec5801672110679cfda854f7e96bd0a382662440d96ff41e39d842491`
