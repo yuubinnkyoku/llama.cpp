@@ -38,7 +38,7 @@ static inline void hex_l2fetch_block(const void * addr, size_t size) {
 }
 
 #define HEX_L2_LINE_SIZE           128
-#define HEX_L2_BLOCK_SIZE          (HEX_L2_LINE_SIZE * 4) // flush granularity (lines per loop iteration)
+#define HEX_L2_BLOCK_SIZE          (HEX_L2_LINE_SIZE * 4) // flush granularity (chunks per thread)
 #define HEX_L2_FLUSH_WQ_THRESHOLD  (4 * 1024)
 #define HEX_L2_FLUSH_ALL_THRESHOLD (4 * 1024 * 1024)
 
