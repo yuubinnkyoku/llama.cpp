@@ -1064,7 +1064,7 @@ static std::atomic<long> ggml_tiled_supported_ok{0};
 | **CPU** | `1cc02638355148a78e0423036169f9ae8f480c44d5eeebf0cc9e3ed3506c9150`（Phase 63 標準） |
 | **base** | `d950aa96587fe4bceb27cb1d88f27a3ccbc2d19f951d6a4f89b95b2f28893a27` |
 | **hexagon** | `9c9bfc4874a00a2611caff34ad7b85ce56cf46d2787278f44552d228f7214a72`（Phase 63 標準） |
-| **run53.sh** | Phase 63 の状態に復帰（`GGML_CPU_TILED_MM` を触らない。§19） |
+| **run53.sh** | **`GGML_CPU_TILED_MM` の既定を 0**（§21 で確定。旧版は `run53.sh.bak-c64t2`）。この既定で 32-step が `e788051e` のまま（実測、hash 影響なし） |
 | **シンボリックリンク** | `libs/` の cpu/skel/hexagon は**実ファイル**（`ls -l` で `^l` が 0 件） |
 | replay | `25358 11 198 760`（復元済み） |
 | プロセス | **0** |
