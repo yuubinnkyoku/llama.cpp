@@ -251,8 +251,8 @@ CPU `1cc02638`・skel `312ad7b7`・base `d950aa96`・hexagon `9c9bfc48`。
 | # | 目標 | 判定 | 根拠 |
 | --- | --- | --- | --- |
 | 0 | ゲート | **PARTIAL** | unit 15/15 + 88/88、標準組の 64-step NLL 一致（§0）。32-step の `e788051e` 確認は 64-step の NLL 一致で代替 |
-| 1 | Op Fusion rework | **BLOCKED** | **25 コミットの先行が必要**と実測で判明（#30843 は系列 26/63）。単独 cherry-pick は 25 ファイル・76 ハンク。§1.1 |
-| 2 | repack rework + q2_K | **PARTIAL（q2_K 達成）** | **q2_K が動作**（Phase 62 の 0 トークン故障を解消）。64-step argmax 63/64、d_nll +0.0007（t=+0.24）。**repack rework 本体は未着手**（§2.7） |
+| 1 | Op Fusion rework | **BLOCKED（取らないと判断）** | **前段の repack rework を取ると fork の中核（IQ2/IQ3 tiled）が消える**ため不採用と判断（§17）。上流の tiled 型表に IQ2/IQ3 が無く、`matmul-ops.c` の IQ 参照は fork 160 / 上流 0。Op Fusion はその後段なので併せて不可 |
+| 2 | repack rework + q2_K | **PARTIAL（q2_K 達成、rework は不採用）** | **q2_K が動作**（Phase 62 の 0 トークン故障を解消、41 テンソル実在を確認）。64-step argmax 63/64、d_nll +0.0007。**repack rework は §17 の理由で取らないと判断** |
 | 2b | 主力 5 型の無傷確認 | **PASS** | argmax 63/64、PPL 差 0.07%、d_nll が統計的にゼロ（§2.5） |
 | 3 | グループ④⑤ | **PARTIAL** | ④ SSM 経路は達成（#29971 取り込み）。⑤ FA 改善は未着手 |
 | 4 | 継続項目 | **PARTIAL（decode は達成）** | **decode 12-run で「NGL=44/50 に実質差なし」を確定**（t=1.77、符号反転。§16）。tiled 発動計測で既定 ON の退行を発見（§12）。q2_K は 41 テンソル実在を確認（§15）。Bonsai は未実施。evidence 第2点は不要（§13） |
@@ -750,3 +750,111 @@ NGL=50 の IQR（222 ms）は NGL=44（94 ms）の **2.4 倍**。標準偏差も
 
 **理由は未特定**（層あたりの HTP 負担が増えるため熱/帯域の影響を受けやすい、と
 推測されるが検証していない）。
+
+---
+
+## §17 追記6: **repack rework は取ってはいけない（決定的な理由）**
+
+目標2-1 と目標1 の前提として repack rework（`b797b9ca8`、#30635、24 ファイル、
++3,539/-3,438）を実際に当てて中身を精査した。**結論: この rework をそのまま取ると
+fork の中核能力が消える。取らない方が正しい。**
+
+### §17.1 精査の方法
+
+probe ブランチ（`codex/c64-repack-probe`）で cherry-pick して競合を数え、
+上流の新フレームワークのインタフェースを読み、fork 側の対応物と突き合わせた。
+probe は破棄済み（`git branch -D` で削除、作業ツリーは `ee85c2bd4` に戻した）。
+
+### §17.2 競合の規模
+
+**99 ハンク / 10 ファイル**:
+
+| ハンク | ファイル |
+| --- | --- |
+| **41** | `htp/matmul-ops.c` |
+| **34** | `ggml-hexagon.cpp` |
+| 9 | `htp/matmul-ops.h` |
+| 5 | `htp/get-rows-ops.c` |
+| 5 | `htp/hvx-mm-kernels-float.h` |
+| 2 | `htp/main.c` |
+| 1 ずつ | `get-rows-ops.h`, `hmx-mm-kernels-tiled.h`, `hvx-mm-kernels-tiled.h`, `tests/test-backend-ops.cpp` |
+
+`ggml-hexagon.cpp` から 2,232 行が `htp-repack.cpp`（新規 1,000 行）へ**移動**する。
+fork 側の該当関数は 27 個（13 型 × 往復 + ディスパッチャ）:
+
+```
+repack_q4_0_tiled / repack_tiled_q4_0      repack_q4_K_tiled / repack_tiled_q4_K
+repack_q8_0_tiled / ...                    repack_q5_K_tiled / ...
+repack_mxfp4_tiled / ...                   repack_q2_K_tiled / ...
+repack_q6_K_tiled / ...                    repack_iq2_s_tiled / ...
+repack_q3_K_tiled / ...                    repack_iq2f_tiled / ...
+repack_iq3xxs_tiled                        repack_iq3s_tiled
+repack_tensor_tiled（ディスパッチャ）
+```
+
+### §17.3 決定的な事実: 上流のフレームワークに IQ2/IQ3 の枠が無い
+
+上流の `htp-repack.h`（rework 後）の tiled 対象型はこれだけ:
+
+```
+Q4_0, Q4_1, Q8_0, IQ4_NL, MXFP4, Q6_K, Q4_K, Q5_K, Q3_K, Q2_K, F16, F32, BF16
+```
+
+**IQ2_S / IQ2_XS / IQ2_XXS / IQ3_XXS / IQ3_S / IQ4_XS が入っていない。**
+
+上流の `htp/matmul-ops.c`（rework 後）を検索しても **IQ2/IQ3/IQ1/IQ4_XS の参照は
+0 件**。一方 fork の `matmul-ops.c` には **160 件**、
+`ggml-hexagon.cpp` に 30 件ある。
+
+**つまり: 上流の HTP は IQ2/IQ3 の tiled matmul を実装していない。**
+fork が Phase 44〜58 かけて作った IQ2/IQ3 の repack・4 列カーネル・VTCM 常駐は
+**fork だけのもの**である。
+
+### §17.4 これが Phase 63 の evidence テストを説明する
+
+Phase 63 で上流素の 27B が **splits 262** だった理由が、速度の測定ではなく
+**ソースで説明できた**:
+
+- 27B の重みは IQ2/IQ3 系が 313 テンソル（全体の 37%、§15）。
+- 上流の HTP はその型を tiled matmul で扱えない。
+- したがってノードごとに CPU へフォールバックし、262 分割になる。
+
+**「上流が 27B を担えない」は性能の問題ではなく、機能の欠落だった。**
+
+### §17.5 取るべきでない理由（まとめ）
+
+1. **IQ2/IQ3 の repack 27 関数を新しい枠に移す先が無い。** 上流のフレームワークは
+   13 型しか対象にしておらず、IQ2/IQ3 を「足す」には上流の型表・タイル定義・
+   カーネル・repack をすべて拡張する必要がある。それは rework の取り込みではなく
+   **上流フレームワーク上への fork 機能の再実装**であり、既存の 27 関数を
+   そのまま使えない。
+2. **取り込むと IQ2/IQ3 が tiled でなくなる**（＝ CPU フォールバックに戻る）。
+   これは 262 分割の状態に自分から戻すことを意味する。
+3. **q2_K は rework 無しで既に動いている**（§2.1）。rework の便益のうち
+   本 Phase が期待していた部分は既に達成済み。
+
+### §17.6 だから目標1（Op Fusion）も取れない
+
+Op Fusion（#30843）は repack rework の**後**に位置し、rework の新フレームワーク
+（`htp-kparams.cpp`・`htp-fusion.cpp`）を土台にする。**土台を取らないと決めた以上、
+Op Fusion も取れない。**
+
+**目標1 を達成する唯一の道**は次のどちらかであり、**どちらも Phase 65 の
+設計判断**（本 Phase では決めない）:
+
+- **(a) 上流フレームワークを採用し、IQ2/IQ3 をその上に再実装する。**
+  §17.2 の 27 関数を新インタフェースに書き直す。工数は大きいが、以後の上流追従は楽になる。
+- **(b) 上流の Op Fusion だけを fork の repack 層に移植する。**
+  fusion の利益（op 統合）は得られるが、上流との差分は広がり続ける。
+
+**推奨は (b) の部分採用**: Op Fusion のうち **`htp-kparams.cpp`（カーネルパラメータの
+汎用化）と RMS_NORM_MUL fusion（#31822）** は repack 層に依存しない可能性が高く、
+SGN/DSV4/LIGHTNING_INDEXER の解禁に必要なのは kparams だけである。
+**この 2 つを個別に移植する方が、24 ファイルの rework を飲むより安全で安い。**
+（未検証。Phase 65 の最初に依存を確認する。）
+
+### §17.7 この節の位置づけ
+
+**「取れなかった」ではなく「取らないと決めた」**である。理由は競合の多さではなく、
+**上流のフレームワークに fork の中核機能の枠が無い**という機能的な事実。
+Phase 62/63 が「基盤を入れれば解禁される」と見ていた前提を、ここで訂正する。
