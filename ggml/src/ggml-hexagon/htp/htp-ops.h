@@ -126,6 +126,7 @@ enum htp_op_code {
     HTP_OP_POOL_1D,
     HTP_OP_UNARY_CEIL,
     HTP_OP_UPSCALE,
+    HTP_OP_UNARY_GELU_QUICK,
 
     HTP_OP_INVALID
 };
