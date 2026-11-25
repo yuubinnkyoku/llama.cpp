@@ -95,3 +95,15 @@ if (!use_dma && (htp_tensor_is_extended(src0) || htp_tensor_is_extended(dst))) {
 - 配置が変わるため logits も変わり、凍結 hash の再凍結判断が必要（§6）。
 
 この 2 件（F32 3D MUL_MAT、PAD DMA64）は、所有者の hash 再凍結判断と DSP 変更の承認が得られてから着手する。
+
+## §9 追記（03:00）: ビルド再現性の確認
+
+- HEAD `06cda3ad7` のソースから再ビルドした成果物が、端末に導入した常用 lib と **bit 一致**することを確認した。
+  - skel `f7def94095d19ed7e6e8c3786a2a477b4ed44b57bf786d93597ab88dba47e126`
+  - host `fac8335e6cae19f17fbd6a1e0326789290ce7ccc1f3d5ceafb84a26515e81b99`
+- つまり常用構成（NUB=32 + M タイル、auto m_chunk）はコミット済みソースから再現可能。診断用ノブ（`GGML_HEXAGON_ID_MCHUNK`、`GGML_HEXAGON_ID_PROBE_TOKENS`）は既定値で無効、canary は src1 tail とレイアウト末尾のみを検査する。
+
+## §10 追記（03:00）: 残作業のブロッカー
+
+- NUB=32 の 64-step 品質ゲート: 端末のメモリ窓が取れず保留（c64 の run が 03:00 時点で MemAvailable 0.7 GB まで占有）。CPU 参照 434.1 ms/step は取得済み。
+- F32 3D MUL_MAT / PAD DMA64 の guard 解除: DSP カーネル変更と hash 再凍結の所有者判断待ち（§6〜§8）。
