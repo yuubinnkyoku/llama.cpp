@@ -858,3 +858,43 @@ SGN/DSV4/LIGHTNING_INDEXER の解禁に必要なのは kparams だけである�
 **「取れなかった」ではなく「取らないと決めた」**である。理由は競合の多さではなく、
 **上流のフレームワークに fork の中核機能の枠が無い**という機能的な事実。
 Phase 62/63 が「基盤を入れれば解禁される」と見ていた前提を、ここで訂正する。
+
+### §17.8 §17.6 の推奨を訂正する
+
+§17.6 で「Op Fusion のうち `htp-kparams.cpp` と RMS_NORM_MUL fusion だけを
+個別に移植するのが安い」と書いた。**これを実測で確認したところ、間違いだった。**
+
+- `htp-kparams.cpp` は **2,811 行**。
+- 中身は**テンプレートメタプログラミング**で、各 op が
+  `SolveFn(args..., &kparams)` という**統一シグネチャの solve 関数**を持つことが前提:
+
+```cpp
+template <auto SolveFn, typename... Args>
+static inline bool htp_kparams_check(Args &&... args) {
+    decltype(htp_kparams_type(SolveFn)) kparams;
+    return SolveFn(std::forward<Args>(args)..., &kparams);
+}
+```
+
+- **その統一 solve シグネチャを作るのが #30843 そのもの**である
+  （上流は全 op を solve パターンに書き換え、`htp_kparams_solve` から
+  テンプレートでディスパッチする）。
+- fork の op は独自シグネチャの solver（`htp_mm_hvx_solve_vtcm_params` 等）を
+  持つが、kparams が要求する形ではない。
+
+**したがって「kparams だけ抜く」は成立しない。** kparams を入れるには
+全 op の solve 化（＝ #30843 の本体）が必要で、それは repack rework の上に載っている。
+
+**訂正後の選択肢は実質 1 つ**:
+
+- **(a) 上流フレームワークを採用し、IQ2/IQ3 をその上に再実装する。**
+  §17.2 の 27 関数の書き直し + 上流 rework の取り込み（99 ハンク）。
+  工数は大きいが、以後の上流追従は楽になる。
+- **(b') fork の repack 層を保ったまま、上流の Op Fusion を手で移植する。**
+  kparams のテンプレート機構を fork の solver 群に合わせて書き換える必要があり、
+  実質「上流の fusion を fork 用に再設計する」作業。工数は (a) と同程度かそれ以上で、
+  しかも上流との差分は広がり続ける。
+
+**どちらも Phase 65 の設計判断**であり、本 Phase では決めない。
+**判断材料として確実なのは「安い道は無い」ということ**である。
+§17.6 の「(b) が安い」は撤回する。
