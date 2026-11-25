@@ -39,3 +39,14 @@ $f = "$Dir/bin/libggml-cpu.so"
 $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
 $len = (Get-Item $f).Length
 Write-Host "=== $h  $len  $f"
+
+# Assert the flag actually took. The arch option was silently dropped for every
+# build from Phase 62 to Phase 64, which cost the tiled path 3.5x, so check the
+# cache and the instruction count instead of trusting the command line.
+if ($cache -notmatch 'dotprod') { throw "GGML_CPU_ARM_ARCH did not take: $cache" }
+
+$objdump = 'D:\android-sdk\ndk\29.0.14206865\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-objdump.exe'
+$sdot = (& $objdump -d --no-show-raw-insn $f 2>$null | Select-String -Pattern '\bsdot\b' | Measure-Object).Count
+Write-Host "=== sdot count: $sdot"
+if ($sdot -eq 0) { throw 'no sdot in libggml-cpu.so: dotprod is not in the binary' }
+
