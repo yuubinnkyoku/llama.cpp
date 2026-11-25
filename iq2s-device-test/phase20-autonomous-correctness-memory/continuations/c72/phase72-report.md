@@ -56,3 +56,23 @@
 ## §6 追記（02:45）: 次工程の候補
 
 - host 側 guard 解除（mix() の CONT 3D/F32 3D MUL_MAT、PAD の DMA64 extended mapping）は、配置が変わり logits が変わるため**凍結 hash `65dd1c56…` と bit 一致しない**。実施には Phase 65 と同様の hash 再凍結の所有者判断が必要。
+
+## §7 追記（02:57）: host 側 guard 解除の実装調査
+
+次工程候補の 2 件について、コード上の現在地を確認した。
+
+1. **F32 3D MUL_MAT（mix() の 3D バッチ）**
+   - ガード: `ggml_hexagon_supported_mul_mat` の `GGML_TYPE_F32` 分岐（ggml-hexagon.cpp:7060 付近）
+     ```c
+     // the f32 kernel is 2D only; the looped mix matmuls are 3D batched
+     if (src0->ne[2] > 1 || src0->ne[3] > 1) {
+         return false;
+     }
+     ```
+   - 単純に削除すると、2D 専用の F32 カーネルに 3D 入力を渡すことになり不正。3D を回すには DSP 側のバッチ対応（ループをカーネル内に持つ）か、ホスト側で 2D に分解して複数回投入する仕組みが必要。**ガード削除だけでは成立しない。**
+2. **PAD の DMA64 extended mapping**
+   - ホストの `ggml_hexagon_supported_pad` は F32 と circular 範囲のみ検査しており、DMA64 用の明示ガードは見当たらない。
+   - DMA64 はバッファ層で `extended = opt_dma64 && is_weight`（ggml-hexagon.cpp:5115）と 2 MB アラインメント（791 付近）で扱う。PAD の入力は weight ではないため通常マッピングであり、問題があるとすれば DSP 側 PAD カーネルの DMA 記述（extended 前提のアドレス計算）側。**次は DSP の PAD 実装を確認する必要がある。**
+3. どちらも配置が変わり logits が変わるため、凍結 hash `65dd1c56…` との bit 一致は成立しない。実施には hash 再凍結の所有者判断が必要（§6）。
+
+- コード変更はしていない（既定経路・hash を維持）。
