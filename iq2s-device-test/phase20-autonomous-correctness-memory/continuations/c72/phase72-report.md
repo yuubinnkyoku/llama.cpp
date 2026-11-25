@@ -125,3 +125,27 @@ if (!use_dma && (htp_tensor_is_extended(src0) || htp_tensor_is_extended(dst))) {
 
 - 値は Phase 66 の NUB=8 64-step ゲートと完全に一致（argmax 64/64、NLL delta +0.001747、t +0.8330、corr 0.99868）。**採用した NUB=32 構成でも品質ゲート PASS を確認**。
 - これで Phase 72 の採用検証（hash bit 一致、A/B、split timing、swap 有効性、64-step 品質）がすべて揃った。
+
+## §12 設計メモ: guard 解除の実装案（所有者判断用）
+
+### A. F32 3D MUL_MAT（mix の 3D バッチ）
+
+- 現状: host `ggml_hexagon_supported_mul_mat` の F32 分岐が `src0->ne[2] > 1 || src0->ne[3] > 1` を拒否。DSP の F32 カーネルは 2D（行列 x ベクトル/行列）。
+- 案 A1（DSP 側バッチ）: `matmul-ops.c` の F32 ドライバで `i2, i3` をループし、各バッチの重み/activation スライスで 2D カーネルを呼ぶ。変更範囲は DSP の 1 関数とホストのフラグ分岐。activation は 3D のレイアウト（nb[2]）を考慮したポインタ計算が必要。
+- 案 A2（ホスト分割）: スケジューラで 3D F32 MUL_MAT を 2D に分解できればホストだけで済むが、ggml のグラフは op 単位で置換できないため、専用の host 変換パスが必要。実装コストは A1 より大きい。
+- 推奨: A1（DSP 1 関数 + ホストのフラグ分岐）。`GGML_HEXAGON_F32_3D=1` のときのみ 3D を許可。
+- リスク/検証: 3D バッチの添字・nb 計算の誤りは数値破壊に直結。test-backend-ops の MUL_MAT(type_a=f32, 3D) で CPU 一致を確認 → LOAD_ONLY → 実モデル（logits 変化を記録、hash 再凍結は所有者判断）。
+
+### B. PAD の DMA64 extended mapping
+
+- 現状: `pad-ops.c` の `if (!use_dma && (htp_tensor_is_extended(src0) || htp_tensor_is_extended(dst))) return HTP_STATUS_NO_SUPPORT;`。DMA 経路は ne00 >= 512 かつ VTCM 2 面分が条件。
+- 案 B1（非 DMA 経路の extended 対応）: HVX コピーの行ポインタを 64 bit で扱う（`dma_addr_t` のまま計算）ように修正。extended は 2 MB アラインされた FASTRPC マップで、DSP の通常ロードは 32 bit オフセットの可能性があるため、アドレス計算の棚卸しが必要。
+- 案 B2（DMA 条件の拡大）: extended でも DMA 経路を使えるようにする（VTCM 条件を緩める、行サイズ < 512 では DMA 記述が 2D になるため不可の可能性）。
+- 推奨: B1 を `GGML_HEXAGON_PAD_DMA64=1` のときのみ有効化し、既定は現状維持。
+- リスク/検証: アドレス誤りは DSP フォルト（再起動リスク）。LOAD_ONLY + 監視、test-backend-ops の PAD で CPU 一致、実モデルでは配置が変わるため hash 再凍結判断。
+
+### 判断をお願いしたいこと
+
+1. これら 2 件に着手してよいか（既定 off のフラグ裏で実装し、既定経路・凍結 hash は不変に保つ）。
+2. 有効化する場合の hash 再凍結の扱い（Phase 65 の down HTP 採用と同じ手順で再凍結するか）。
+3. DSP 変更を伴うため、実機検証は LOAD_ONLY から段階的に行う承認。
