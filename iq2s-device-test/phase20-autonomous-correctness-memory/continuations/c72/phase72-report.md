@@ -107,3 +107,21 @@ if (!use_dma && (htp_tensor_is_extended(src0) || htp_tensor_is_extended(dst))) {
 
 - NUB=32 の 64-step 品質ゲート: 端末のメモリ窓が取れず保留（c64 の run が 03:00 時点で MemAvailable 0.7 GB まで占有）。CPU 参照 434.1 ms/step は取得済み。
 - F32 3D MUL_MAT / PAD DMA64 の guard 解除: DSP カーネル変更と hash 再凍結の所有者判断待ち（§6〜§8）。
+
+## §11 追記（03:12）: NUB=32 64-step 品質ゲート PASS
+
+- 実行: `gate with --min-mem 11`（03:03 にロック取得、MemAvailable 11.59 GB）。warmup htp 8 step の後、htp 64 step。
+- 結果: **rc=0、64 step 完走**、first token 182416、HTP buffer 5,348.86 MiB、**swap 759 pages（0.003 GiB）**、decode 869.8 ms/step（この run は負荷状態で遅いが品質判定には無関係）。
+- CPU 参照（NUB=32、64 step、434.1 ms/step）との比較:
+
+| 指標 | 値 | 判定 |
+| --- | --- | --- |
+| argmax 一致 | **64 / 64** | PASS |
+| NLL 平均差 | **+0.001747** | 有意差なし |
+| NLL 差の t 値 | **+0.8330** | ±1 内 PASS |
+| logit 差 mean_abs / max_abs | 0.179374 / 2.425067 | 小さい |
+| 相関（最小 / 平均） | 0.99152 / 0.99868 | 高い |
+| CPU argmax が HTP top10 内 | 64 / 64 | PASS |
+
+- 値は Phase 66 の NUB=8 64-step ゲートと完全に一致（argmax 64/64、NLL delta +0.001747、t +0.8330、corr 0.99868）。**採用した NUB=32 構成でも品質ゲート PASS を確認**。
+- これで Phase 72 の採用検証（hash bit 一致、A/B、split timing、swap 有効性、64-step 品質）がすべて揃った。
