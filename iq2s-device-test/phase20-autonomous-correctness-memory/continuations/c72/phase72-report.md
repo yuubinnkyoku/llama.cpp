@@ -76,3 +76,22 @@
 3. どちらも配置が変わり logits が変わるため、凍結 hash `65dd1c56…` との bit 一致は成立しない。実施には hash 再凍結の所有者判断が必要（§6）。
 
 - コード変更はしていない（既定経路・hash を維持）。
+
+## §8 追記（03:00）: PAD の DMA64 ガードの特定
+
+DSP 側 `pad-ops.c` の `op_pad`（475 行付近）に該当ガードを確認した。
+
+```c
+const int use_dma = (src0->nb[0] == (uint32_t)type_size) && (ne00 >= 512) &&
+                    (octx->ctx->vtcm_size >= vtcm_needed);
+
+if (!use_dma && (htp_tensor_is_extended(src0) || htp_tensor_is_extended(dst))) {
+    return HTP_STATUS_NO_SUPPORT;
+}
+```
+
+- DMA 経路は「F32 連続・ne00 >= 512・VTCM に 2 面分が収まる」ときだけ選ばれる。それ以外で extended（DMA64 の 2 MB アライン領域）だと **NO_SUPPORT** を返す。
+- 解除するには、非 DMA 経路（HVX コピー）を extended アドレスでも安全に動かすか、DMA 経路の採用条件を広げて extended でも使えるようにする必要がある。**単純なガード削除はアドレス計算の破綻リスク**があり、DSP カーネルの修正と実機検証（LOAD_ONLY から）が前提。
+- 配置が変わるため logits も変わり、凍結 hash の再凍結判断が必要（§6）。
+
+この 2 件（F32 3D MUL_MAT、PAD DMA64）は、所有者の hash 再凍結判断と DSP 変更の承認が得られてから着手する。
