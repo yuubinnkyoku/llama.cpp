@@ -255,8 +255,9 @@ CPU `1cc02638`・skel `312ad7b7`・base `d950aa96`・hexagon `9c9bfc48`。
 | 2 | repack rework + q2_K | **PARTIAL（q2_K 達成）** | **q2_K が動作**（Phase 62 の 0 トークン故障を解消）。64-step argmax 63/64、d_nll +0.0007（t=+0.24）。**repack rework 本体は未着手**（§2.7） |
 | 2b | 主力 5 型の無傷確認 | **PASS** | argmax 63/64、PPL 差 0.07%、d_nll が統計的にゼロ（§2.5） |
 | 3 | グループ④⑤ | **PARTIAL** | ④ SSM 経路は達成（#29971 取り込み）。⑤ FA 改善は未着手 |
-| 4 | 継続項目 | **未実施** | 時間切れ（decode 12-run、tiled 発動計測、evidence 第2点、Bonsai） |
-| — | 速度 ABBA | **INCONCLUSIVE** | 熱で cap が 3.19→1.11 GHz 変動。同一 cap の組が 1 つだけ（§4） |
+| 4 | 継続項目 | **PARTIAL** | **tiled 発動計測を実施し、既定 ON が 25% の退行と判明**（§12）。decode 12-run・Bonsai は未実施。evidence 第2点は上流の型カバレッジが動いていないため不要（§13） |
+| — | 速度 ABBA（基盤 vs 標準） | **INCONCLUSIVE** | 熱で cap が 3.19→1.11 GHz 変動。同一 cap の組が 1 つだけ（§4） |
+| — | **tiled 既定 ON の評価** | **FAIL（退行）** | **CPU prefill が 25.3% 遅い**（cap 1,996,800 で ON 114,470.8 / OFF 91,346.9 ms、各 4 run）。`GGML_CPU_TILED_MM=0` は hash 不変（`e788051e`）なので無コストで回避可。run53.sh の既定を 0 にした（§12） |
 
 ### §6.2 分かったこと（要約）
 
@@ -582,3 +583,50 @@ hash は変わらない」と書いた。**hash については正しかった**
 **しかし「だから既定 ON にしてよい」は飛躍だった。** 既定 ON の是非は
 **速度で判断すべきで、その測定を Phase 63 はしていなかった。** これが本 Phase の
 最大の成果であり、同時に Phase 63 の手順の穴である。
+
+---
+
+## §13 追記3: 上流監視 - evidence 第2測定点は不要と判定
+
+Phase 63 の evidence テストは上流 `3090e45a8` で **splits 262** を記録した。
+Phase 64 の指示は「上流の hexagon 型カバレッジが大きく動いていたら再測定」と
+条件付きだった。実測:
+
+| 項目 | 値 |
+| --- | --- |
+| Phase 63 の測定点 | `3090e45a8`（2026-11-24 16:34） |
+| 本 Phase の上流先端 | `244640b7f` |
+| **その間の hexagon コミット** | **1 件のみ** |
+| 内容 | `62d6c8cb3 ggml: allow input async copies (#30685)` |
+
+**型カバレッジを変えるコミットは無い**（async copy は転送機構の変更）。
+したがって**指示の条件を満たさず、再測定は不要**と判断した。
+
+**「262 が減ったか」を見るのは、IQ2_XS/IQ2_S/IQ3_S/IQ3_XXS の HTP 対応が
+入ったとき**である。Phase 63 の `p63_evid.sh` と `libs/up63/` の手順は
+そのまま使えるので、次に型対応が入った時点で 1 コマンドで測れる。
+
+---
+
+## §14 更新後の終了状態
+
+| 項目 | 値 |
+| --- | --- |
+| **skel** | `312ad7b7ab304762f7c347e7909ee5d569541b15994073cfc11f55d0edf38114`（Phase 63 標準、**載せ替えなし**） |
+| **CPU** | `1cc02638355148a78e0423036169f9ae8f480c44d5eeebf0cc9e3ed3506c9150`（Phase 63 標準） |
+| **base** | `d950aa96587fe4bceb27cb1d88f27a3ccbc2d19f951d6a4f89b95b2f28893a27` |
+| **hexagon** | `9c9bfc4874a00a2611caff34ad7b85ce56cf46d2787278f44552d228f7214a72`（Phase 63 標準） |
+| **run53.sh** | **`GGML_CPU_TILED_MM` の既定を 0 に変更**（上書き可）。旧版は `run53.sh.bak-c64t` |
+| replay | `25358 11 198 760`（復元済み） |
+| プロセス | 残留なし |
+| 前面アプリ停止 | **0 回** |
+| 再起動 | なし |
+| メイン worktree | 9 ファイルのまま保護 |
+| ビルドパス | `build/c63-test`（hexagon/skel の hash はこのパス依存） |
+
+### §14.1 本 Phase の追加コミット
+
+| commit | 内容 |
+| --- | --- |
+| `ac99cebf3` | HMX FA sink 修正（#30581）+ HVX softplus（#30435） |
+| `613f16b1d` | **tiled 既定 ON の退行を記録 + `GGML_CPU_TILED_MM=0` を運用既定に** |
