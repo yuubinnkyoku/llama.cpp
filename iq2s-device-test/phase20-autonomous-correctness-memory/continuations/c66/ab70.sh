@@ -2,6 +2,10 @@
 # Phase 70: adoption A/B, prefill 512 and decode 32, NUB=8 non-tiled vs NUB=32 tiled.
 set -u
 export MSYS_NO_PATHCONV=1
+if [ -z "${ANDROID_SERIAL:-}" ]; then
+  export ANDROID_SERIAL=$(adb devices | awk 'NR>1 && $2=="device" && $1 ~ /_adb-tls-connect/ {print $1; exit}')
+  [ -z "${ANDROID_SERIAL:-}" ] && export ANDROID_SERIAL=$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')
+fi
 A=adb
 B=/data/local/tmp/c61-inkling2
 echo "== mem start"
