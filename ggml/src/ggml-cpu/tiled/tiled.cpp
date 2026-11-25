@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <atomic>
+#include <cstdio>
 #include <mutex>
 
 #define UNUSED GGML_UNUSED
@@ -1214,11 +1216,31 @@ static bool ggml_tiled_min_batch(int64_t rows) {
     return rows >= 8 || ggml_tiled_matmul_forced();
 }
 
+static std::atomic<long> ggml_tiled_calls{0};
+static std::atomic<long> ggml_tiled_rows_ok{0};
+static std::atomic<long> ggml_tiled_supported_ok{0};
+
+// GGML_CPU_TILED_MM_COUNT: report how often the tiled path is actually taken, to stderr
+// at exit. Phase 64 needs this to tell "the path is slow" apart from "the path never runs".
+static void ggml_tiled_count_report(void) {
+    fprintf(stderr, "ggml-tiled: calls %ld rows_ok %ld supported_ok %ld\n",
+            ggml_tiled_calls.load(), ggml_tiled_rows_ok.load(), ggml_tiled_supported_ok.load());
+}
+
+static void ggml_tiled_count_init(void) {
+    if (getenv("GGML_CPU_TILED_MM_COUNT") == nullptr) {
+        return;
+    }
+    std::atexit(ggml_tiled_count_report);
+}
+
 // tiled K-quant matmul; returns true if the op was computed here,
 // false to fall through to the stock path
 bool ggml_compute_forward_mul_mat_tiled(
         const struct ggml_compute_params * params,
               struct ggml_tensor * dst) {
+    static const bool counted = (ggml_tiled_count_init(), true);
+    (void) counted;
     // --use-ref means bail out and go back to vec_dot reference impl
     if (params->use_ref) {
         return false;
@@ -1226,10 +1248,16 @@ bool ggml_compute_forward_mul_mat_tiled(
     if (!ggml_tiled_supported(dst->src[0], dst->src[1])) {
         return false;
     }
+    ggml_tiled_supported_ok.fetch_add(1);
     if (!ggml_tiled_min_batch(dst->src[1]->ne[1])) {
         return false;
     }
-    return ggml_tiled_matmul_type_dispatch(params, dst);
+    ggml_tiled_rows_ok.fetch_add(1);
+    const bool done = ggml_tiled_matmul_type_dispatch(params, dst);
+    if (done) {
+        ggml_tiled_calls.fetch_add(1);
+    }
+    return done;
 }
 
 // MUL_MAT_ID (MoE), one expert; returns true if the expert was computed here,
