@@ -733,7 +733,7 @@ NTHREADS に到達できない。
 **次フェーズの推奨**: 上記 2 の 1 行（環境変数での上書きを許す）を入れ、
 その変更自体が hash を変えないことを 32-step で確認してから掃引する。
 
-### §12.2 `GGML_CPU_TILED_MM_COUNT` の傍証 - **未実施**
+### §12.2 `GGML_CPU_TILED_MM_COUNT` の傍証 - ~~未実施~~ -> **§16 で実施済み（実 workload で 4,256 回）**
 
 Phase 64 で計装を入れ、`GGML_CPU_TILED_MM=1` で 12,800 回の発動を確認済み。
 Phase 65 は prefill 512 の測定で tiled が通っていることは前提にしているが、
@@ -866,3 +866,88 @@ NTHREADS=${NTHREADS:-${5:-6}}     # 旧: NTHREADS=${5:-6}
 `dotprod` を入れても最適スレッド数は動かなかった。
 
 **変更しない。** 既定 6 を維持する。
+
+---
+
+## §16 追記: tiled 発動の傍証を実 workload で取得（§12.2 を解消）
+
+Phase 64 では NGL=0（CPU のみ）で 12,800 回の発動を確認したが、
+**実 workload（NGL=44、HTP 併用）での発動は確認していなかった。**
+
+計装ビルド（`9a8c95cd`）を一時的に入れ、NGL=44・prefill 128・実 27B で 1 run:
+
+```
+ggml-tiled: calls 4256 rows_ok 4256 supported_ok 8512
+```
+
+| 指標 | 値 | 意味 |
+| --- | --- | --- |
+| `supported_ok` | 8,512 | 型・レイアウトの条件を通った matmul |
+| `rows_ok` | 4,256 | そのうち rows>=8 も通った |
+| **`calls`** | **4,256** | **実際に tiled カーネルで計算された** |
+
+**実 workload でも tiled は 4,256 回発動している。** 半分が `rows_ok` で落ちるのは、
+prefill 中でも rows<8 の小さな matmul（正規化後の射影など）があるため。
+**これは想定内で、異常ではない。**
+
+**計装ビルドは標準ではない**（`9a8c95cd`）。測定後に **`abecaf60` に戻したことを
+sha256 で確認済み**（`abecaf609042e0921b1dcd651a5982e3882ed0dbbc673026bf9bec3cd36d8c51`）。
+
+**したがって Phase 64 の「tiled は dotprod があると 3.5 倍速い」は、
+実 workload で実際に効いている経路の話である**ことが確認できた。
+
+---
+
+## §17 追記: 上流監視 - HTP 側の FWHT は**既に入っていた**
+
+指示の上流監視項目（#32582 の merge 動向、FWHT/Hadamard の Hexagon 入り）を
+上流ツリーで直接確認した。
+
+### §17.1 上流 master の状態
+
+| 項目 | 値 |
+| --- | --- |
+| 上流 master（確認時） | `98cc730` |
+| 直近の hexagon コミット（`244640b7f` 以降） | **1 件**（型表は不変） |
+| tiled 対象の IQ 系 | **`IQ2_XXS` のみ**（IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ4_XS は無い） |
+
+### §17.2 **FWHT は Hexagon に入っている**
+
+上流の hexagon バックエンド内の `fwht`/`hadamard` 参照:
+
+| ファイル | 参照数 |
+| --- | --- |
+| `htp/unary-ops.c` | **29** |
+| `htp/unary-ops.h` | 4 |
+| `htp/htp-opnode.cpp` / `.h` | 3 / 3 |
+| `htp/htp-fusion.cpp` | 2 |
+| `htp/htp-kparams.cpp` | 2 |
+| `htp/htp-ops.h` / `main.c` | 1 / 1 |
+
+**HTP 側の FWHT カーネルは実装済みである。**
+「FWHT が Hexagon に無いのが Bonsai 全面 NPU 化の最後の蓋」という
+Phase 64 までの理解は**古い**。
+
+### §17.3 ただし私の測定ビルドにも入っていた
+
+決定的な確認: 私が Bonsai を測った **`fa9f928`** の時点で、
+`unary-ops.c` の `fwht` 参照は **24 件**あった（`98cc730` でも 24 件）。
+
+**したがって §1.3 の「上流 HTP はロード時に rc 134 で落ちる」は、
+FWHT カーネルが存在する状態で起きた現象である。**
+
+### §17.4 結論の更新（より強く、より正確に）
+
+**Bonsai の HTP 動作を妨げているのは FWHT の不在ではない。**
+上流 master は FWHT カーネルも Prism Bonsai のモデル対応も持っており、
+それでも `-ngl 99/20/8` のすべてで `dspqueue_read failed: 0x2e` で落ちる。
+
+**残る障壁はベンダーの未リリース修正のみ**であり、これは PrismML の preset の
+記述（"No public build runs this model correctly on the Hexagon NPU yet;
+it needs a fix that is not released"）と一致する。
+
+**fork にとっての追加の事実**: この FWHT は `htp-kparams.cpp` /
+`htp-fusion.cpp` / `htp-opnode.cpp` という **Op Fusion フレームワークの中**にある。
+Phase 64 §17 で「そのフレームワークは取らない」と決めた以上、
+**fork がこの HTP FWHT を使えるようになる見込みは薄い。**
+fork 側で Bonsai を NPU で動かすには、フレームワークごと方針を見直す必要がある。
