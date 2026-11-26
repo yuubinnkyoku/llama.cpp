@@ -31,6 +31,7 @@ arm() {
     G2=$(sha256sum $L/libggml-htp-v81.so | cut -d' ' -f1)
     G3=$(sha256sum $L/libggml-cpu.so | cut -d' ' -f1)
     [ "$G3" = "$CPU" ] || { echo "P65A REFUSING cpu $G3 != $CPU"; return 2; }
+    CUR_SKEL=$G2
     echo "P65A_ARM $LAB hex ${G1:0:8} skel ${G2:0:8}"
 }
 
@@ -39,7 +40,7 @@ pf() {  # $1 tag, $2 tokens
     C0=$(cap); Z0=$(tz0)
     env GUARD_PAGES=2097152 RUN_TIMEOUT=$TIMEOUT MEM_MIN_KB=4000000 \
         WARM_SKIP_TOUCH=1 WARM_RES_MIN_PCT=0 \
-        P53_PROMPT_TOKENS=$NT P53_NO_LOGITS=1 \
+        WANT_SKEL=$CUR_SKEL P53_PROMPT_TOKENS=$NT P53_NO_LOGITS=1 \
         sh $BASE/p53_run.sh 4 noreplay 44 $T 0 > /dev/null 2>&1
     RC=$?
     C1=$(cap); Z1=$(tz0)
@@ -48,6 +49,7 @@ pf() {  # $1 tag, $2 tokens
     EXIT=$(cat $R/exit.txt 2>/dev/null)
     PFL=$(grep -oE "PREFILL seg 0 tokens [0-9]+ ms [0-9.]+" $R/stdout.txt 2>/dev/null | head -1 | awk '{print $7}')
     DEC=$(grep -oE "RESULT forwards [0-9]+ decode_ms [0-9.]+" $R/stdout.txt 2>/dev/null | head -1 | awk '{print $5}')
+    if [ "$RC" != "0" ]; then echo "P65A_ABORT run $T failed rc $RC (see p53-$T.out)"; return 3; fi
     echo "P65A_RUN $T nt $NT rc $RC exit ${EXIT:-NA} prefill_ms ${PFL:-NA} decode_ms ${DEC:-NA} cap0 $C0-$C1 tz0 $Z0-$Z1"
     if [ "$RC" != "0" ] || [ "${EXIT:-x}" != "0" ]; then
         for p in $(ps -A -o PID,NAME | awk '/decode-probe/{print $1}'); do
