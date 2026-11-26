@@ -542,7 +542,7 @@ NGL を変更しないため（44 維持）、配置が変わらず **hash も�
 - **decode の NGL 依存判定**（§5.3, §22。4 forward の probe は振れ 54% で判定不能。128 token 級が必要）
 - **fork への `#29600` 取り込み**（Bonsai のモデル側 Hadamard 配線。§1.5）
 - **llama-cli の実用プリセット固め**
-- **MTP の予備調査**（自由裁量項目）
+- ~~MTP の予備調査~~ -> **§23 で完了（fork は実装済み、モデルに draft head が無い）**
 - **Bonsai の HTP 実行**（ベンダーの未リリース修正待ち。§1.5, §17）
 
 **解消済み（以前は未実施としていたもの）**:
@@ -1268,3 +1268,74 @@ decode の NGL 依存を決めるには:
 4. cap を記録し、揃った run のみ比較する（既存規則）。
 
 **今回はこの測定を実施できなかった。未達として明記する。**
+
+---
+
+## §23 自由裁量: MTP（multi-token prediction）の予備調査 - **完了（分析のみ）**
+
+指示どおり**分析のみ**行い、着手はしていない。
+**結論: fork は MTP の受け皿を既に持っている。足りないのはモデル側の draft head。**
+
+### §23.1 fork が持っているもの（すべて確認済み）
+
+| 要素 | 状態 |
+| --- | --- |
+| `src/llama-ext.h` | **あり**（`llama_set_embeddings_nextn` / `llama_get_embeddings_nextn_ith`） |
+| `LLM_ARCH_QWEN35`（`"qwen35"`） | **あり**（`src/llama-arch.cpp:41`） |
+| `common/speculative.cpp` の `common_speculative_impl_draft_mtp` | **あり**（12 箇所） |
+| `--spec-type draft-mtp` の登録 | **あり**（`common/speculative.cpp:76`） |
+| `--spec-draft-n-min/n-max/p-min` の引数 | **あり**（`common/arg.cpp` に `COMMON_SPECULATIVE_TYPE_DRAFT_MTP`） |
+
+`common/speculative.cpp:1404` のコメントが対応モードを明示している:
+
+```
+// One MTP draft driver, three modes (set once in the ctor):
+//   chain_heads (step35): n_mtp_layers trained heads, one per draft step.
+//   neither (qwen35 / qwen35moe): a single trained MTP head.
+```
+
+**`qwen35` の単一ヘッドモードがサポートされている。** 我々の 27B は qwen35 系である。
+
+### §23.2 足りないもの: モデルに draft head が無い
+
+GGUF の tensor 名を実際に解析した（§15 と同じ手法、851 テンソル全部）:
+
+```
+nextn/mtp/draft/head tensors: 0
+最後のテンソル: blk.63.post_attention_norm.weight まで
+```
+
+**GSQ-RCO IQ2_S の 27B には MTP ヘッドのテンソルが 1 つも無い。**
+`blk.0` 〜 `blk.63` の本体だけで、追加の NextN ブロックが存在しない。
+
+### §23.3 したがって
+
+| 項目 | 状態 |
+| --- | --- |
+| fork の MTP 実装 | **揃っている**（コード作業は不要） |
+| 現行 27B での MTP | **使えない**（draft head が無い） |
+| Bonsai の MTP | **非公開リポジトリ**（`...-gguf-mtp`、「Private, unreleased ... do not redistribute」） |
+| PrismML の公表値 | decode 6.34 -> 8.79 t/s（MTP on、1 draft が最速） |
+
+**MTP を試すには、draft head を含む GGUF が必要**である。選択肢:
+
+1. **Bonsai の MTP 版を入手する**（非公開・配布禁止のため、所有者の判断が要る）。
+2. **qwen35 系の MTP ヘッドを別途変換する**（元の重みが必要。
+   `chain_heads` ではなく単一ヘッドなので、学習済みヘッドが要る）。
+3. **現行モデルでは諦める。**
+
+**いずれも「コードを書けば解決する」話ではない。** fork 側の準備はできている。
+
+### §23.4 Phase 66 への含意
+
+**MTP は「fork の実装待ち」ではなく「モデル待ち」である。**
+もし MTP ヘッド付きのモデルが入手できれば、
+`--spec-type draft-mtp --spec-draft-n-min 0 --spec-draft-n-max 1 --spec-draft-p-min 0`
+で試せる（PrismML の preset と同じ設定）。
+
+**ただし §21.4 のとおり decode の 99% は CPU 側にある。**
+MTP は「1 回の forward で複数トークンを出す」ので forward 回数が減り、
+**CPU 律速の現状では効果が出やすい**と期待できる。**これは推測で、検証していない。**
+
+**HTP 側が NextN グラフを扱えるかは未確認**（`llama_set_embeddings_nextn` が
+hexagon バックエンドでどう処理されるかを見ていない）。
