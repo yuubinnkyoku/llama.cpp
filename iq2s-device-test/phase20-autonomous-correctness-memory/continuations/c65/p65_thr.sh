@@ -65,5 +65,5 @@ while [ $i -le $ROUNDS ]; do
     i=$((i + 1))
 done
 
-cp $BASE/replay4.bak $L/replay.txt
+cp $BASE/libs/replay.txt.std $L/replay.txt
 echo "P65T_DONE cap $(cap) tz $(tz0)"

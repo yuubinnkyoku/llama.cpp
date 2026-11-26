@@ -92,5 +92,5 @@ while [ $i -le $ROUNDS ]; do
     i=$((i + 1))
 done
 
-cp $BASE/replay4.bak $L/replay.txt
+cp $BASE/libs/replay.txt.std $L/replay.txt
 echo "P65D_DONE cpu $(sha256sum $L/libggml-cpu.so | cut -d' ' -f1) hex $(sha256sum $L/libggml-hexagon.so | cut -d' ' -f1) skel $(sha256sum $L/libggml-htp-v81.so | cut -d' ' -f1)"
