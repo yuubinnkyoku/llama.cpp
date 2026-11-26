@@ -33,7 +33,7 @@ case "$STEPS" in ''*[!0-9]*) echo "REFUSING: STEPS must be a number"; exit 2 ;; 
 REPLAY_MODE=${3:-replay}
 PROFILE=${4:-2}
 case "$PROFILE" in ''*[!0-9]*) echo "REFUSING: PROFILE must be a number"; exit 2 ;; esac
-NTHREADS=${5:-6}
+NTHREADS=${NTHREADS:-${5:-6}}
 case "$NTHREADS" in ''*[!0-9]*) echo "REFUSING: NTHREADS must be a number"; exit 2 ;; esac
 if [ "$REPLAY_MODE" = "noreplay" ]; then
     REPLAY_ENV=""
