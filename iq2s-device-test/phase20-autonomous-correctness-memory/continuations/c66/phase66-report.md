@@ -183,3 +183,110 @@ RAM を消費してページキャッシュを追い出した状態で同じ測�
 
 **今後 decode を測るときは、空きメモリと `Cached` を記録すべきである。**
 これは Phase 64 の cap、Phase 65 の重複値に次ぐ、3 つ目の交絡要因になり得る。
+
+---
+
+## §2 目標2: lm_head の居場所 - **HTP に既に居た（Phase 65 の仮説は誤り）**
+
+Phase 65 §24.4 は「CPU の 1 ノード 0.18 s の split は lm_head 濃厚」と推定した。
+**`GGML_SCHED_DEBUG=2` でノード名とバックエンドを直接出力させて確認した。**
+
+### §2.1 方法
+
+`ggml_backend_sched_print_assignments()` は `sched->debug > 1` のとき
+ノードごとに名前とバックエンドを出す（`ggml/src/ggml-backend.cpp:1171-1175`）。
+`p53_run.sh` の第 5 引数（`SCHED_DEBUG`）に 2 を渡すと有効になる。
+
+```
+node #3847 (   MUL_MAT):        result_output ( 970K) [HTP0:         ] use=0,c=1:
+    output.weight ( 644M) [HTP0:         ]  result_norm (  20K) [HTP0:         ]
+```
+
+**`output.weight`（lm_head、644 MB）は `[HTP0: ]` = HTP に割り当てられている。**
+
+`result_output` を生成するノードはグラフの最後（#3847）にあり、両方とも HTP。
+
+### §2.2 結論: **lm_head を HTP に載せる作業は不要**
+
+**Phase 65 の「lm_head が CPU に居る」という推定は誤りだった。**
+すでに HTP にある。**目標2-1 は「HTP にある」で確定。目標2-2/2-3 の実装は不要。**
+
+### §2.3 では CPU の 1 ノード split は何だったのか - **IQ1_M の 2 テンソル**
+
+`sched-split` の内訳（1 パス分）:
+
+| split | backend | nodes | sync_us | compute_us |
+| --- | --- | --- | --- | --- |
+| 0 | CPU | 1270 | 0 | 5,645,530 |
+| 1 | HTP0:0 | 649 | 17 | 112,698 |
+| **2** | **CPU** | **1** | **1,518,946** | 47,040 |
+| 3 | HTP0:0 | 133 | 4 | 410 |
+| **4** | **CPU** | **1** | **208,154** | 64,999 |
+| 5 | HTP0:0 | 1794 | 3 | 134,572 |
+
+**CPU の 1 ノード split は 2 つあり、どちらも sync が支配的**
+（1.52 s と 0.21 s、compute は 0.047 s / 0.065 s）。
+
+そのノードを特定した:
+
+```
+node #1919 (MUL_MAT): ffn_gate-31 ... blk.31.ffn_gate.weight ( 18M) [  CPU         ]
+```
+
+**原因のログ**:
+
+```
+done_getting_tensors: tensor 'blk.31.ffn_gate.weight' (iq1_m) (and 1 others)
+    cannot be used with preferred buffer type HTP0:0, using CPU instead
+```
+
+**fork の HTP は IQ1_M を扱えない。** `ggml_hexagon_is_repack_type()` の型一覧に
+IQ1_M が無い（Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4/Q6_K/Q4_K/Q5_K/IQ2_S/IQ2_XS/IQ2_XXS/
+IQ3_XXS/IQ3_S/IQ4_XS/Q3_K/Q2_K の 16 型のみ）。コードにも
+`// name: blk.0.ffn_up.weight is IQ1_M and IQ1_M is absent from` というコメントがある。
+
+### §2.4 なぜ 2 テンソルだけ問題になるのか
+
+GGUF を解析すると **IQ1_M は 18 テンソル**ある:
+
+| テンソル | 形状 |
+| --- | --- |
+| `blk.14.ffn_up.weight` | 5120 x 17408 |
+| `blk.15.attn_output.weight` | 6144 x 5120 |
+| `blk.16.ffn_gate.weight` | 5120 x 17408 |
+| `blk.17.attn_gate.weight` | 5120 x 6144 |
+| **`blk.31.ffn_gate.weight`** | 5120 x 17408 |
+| **`blk.33.ffn_gate.weight`** | 5120 x 17408 |
+| （他 12） | |
+
+**NGL=44（64 層中 44 層を HTP）では、層 20〜63 が HTP 側。**
+blk.14〜17 は**もともと CPU 側なので問題にならない**。
+**blk.31 と blk.33 は HTP 側にあるべきなのに IQ1_M のため CPU に落ち、
+CPU<->HTP の往復を 2 回作っている。**
+
+**これが Phase 65 で見えた「0.18 s の CPU 1 ノード split」の正体だった。**
+
+### §2.5 Phase 67 への具体的な作業
+
+**本命は lm_head ではなく IQ1_M 対応である。**
+
+1. **`ggml_hexagon_is_repack_type()` に IQ1_M を追加**し、
+   repack（ホスト側）と tiled matmul（DSP 側）を実装する。
+   -> CPU<->HTP の往復が 2 回減り、sync 1.7 s が消える見込み。
+2. **より軽い代替**: 該当 2 テンソルだけを IQ2_S など対応型に変換して再量子化する
+   （品質は要検証だが、コード変更は不要）。
+3. **さらに軽い代替**: NGL を 30 以下にして blk.31/33 を CPU 側に含める
+   （往復は消えるが、他の層も CPU に落ちて遅くなる。§1 の NGL 掃引と矛盾する）。
+
+**見積り**: 1 は repack + カーネルの実装で、fork が IQ2/IQ3 でやった作業と同種。
+ Phase 64 で「上流の tiled 型表に IQ1_M は無い」ことも確認済みなので、
+ **fork 独自の追加**になる。2 は変換スクリプトのみで小さく、まず試す価値がある。
+
+### §2.6 注意（この節の数値の限界）
+
+- `sync_us` の 1.52 s / 0.21 s は**1 回のスケジューリング分の値だが、
+  ウォームアップを含む実行全体に対する集計**であり、1 forward あたりの
+  コストとして直接読めない。**比（sync が compute の 10-30 倍）は信頼できるが、
+  絶対値を decode 1 step の削減見込みとして使ってはいけない。**
+- ノード名とバックエンドの対応（`output.weight` が HTP）は**直接の観測**であり、
+  こちらは確実である。
